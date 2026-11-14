@@ -1,0 +1,155 @@
+import { useEffect } from "react"
+
+import { AssetDrawer } from "./components/AssetDrawer"
+import { CuePanel } from "./components/CuePanel"
+import { Inspector } from "./components/Inspector"
+import { ReferencePanel } from "./components/ReferencePanel"
+import { StagePreview } from "./components/StagePreview"
+import { Timeline } from "./components/Timeline"
+import { TopBar } from "./components/TopBar"
+import { audioNow, deviceLatency, startPlayback, stopPlayback } from "./lib/audio"
+import { usePersistence } from "./lib/project"
+import { showEnd } from "./lib/show"
+import { buildUniverse, lightTime, mediaSpans, useStore } from "./lib/store"
+
+/** Push the universe to the DMX engine on every change (no rAF: it must keep going in the background). */
+function useDmxOutput(): void {
+	useEffect(() => {
+		const push = (): void => {
+			const s = useStore.getState()
+			// the timeline's clips only drive the lights in timeline mode; cue mode writes values directly
+			const clips = s.mode === "timeline" ? s.clips : []
+			window.dmx?.sendFrame(buildUniverse(s.fixtures, clips, lightTime(s), s.blackout))
+		}
+		push()
+		return useStore.subscribe(push)
+	}, [])
+}
+
+/**
+ * Play the show. The audio hardware's clock is the one master clock: the playhead is computed from
+ * it (never from a separate timer that could drift), and the lights read the playhead, so sound
+ * and light cannot slip apart. A timer, not rAF, so it survives a hidden window.
+ */
+function useTransport(): void {
+	const playing = useStore((s) => s.playing)
+	useEffect(() => {
+		if (!playing) {
+			stopPlayback()
+			return
+		}
+		const st = useStore.getState
+		let anchor = startPlayback(st().audioClips, st().playhead)
+		st().setDeviceLatency(deviceLatency())
+		let expected = st().playhead
+		const id = setInterval(() => {
+			const s = st()
+			if (Math.abs(s.playhead - expected) > 0.05) {
+				// the playhead was dragged while playing: restart the sound from the new spot
+				anchor = startPlayback(s.audioClips, s.playhead)
+				expected = s.playhead
+			}
+			const t = anchor.tl + Math.max(0, audioNow() - anchor.ctxTime)
+			const end = showEnd(s.clips, mediaSpans(s))
+			expected = t
+			if (t >= end) {
+				s.setPlayhead(end)
+				s.setPlaying(false)
+			} else {
+				s.setPlayhead(t)
+			}
+		}, 16)
+		return () => {
+			clearInterval(id)
+			stopPlayback()
+		}
+	}, [playing])
+}
+
+/** Run a cue's fade while one is in progress. */
+function useCueFade(): void {
+	const fading = useStore((s) => s.fading !== null)
+	useEffect(() => {
+		if (!fading) return
+		const id = setInterval(() => useStore.getState().tickFade(performance.now()), 16)
+		return () => clearInterval(id)
+	}, [fading])
+}
+
+function useShortcuts(): void {
+	useEffect(() => {
+		const isTyping = (el: HTMLElement): boolean =>
+			el.tagName === "SELECT" ||
+			el.tagName === "TEXTAREA" ||
+			(el.tagName === "INPUT" && (el as HTMLInputElement).type !== "range")
+
+		const onKey = (e: KeyboardEvent): void => {
+			const el = e.target as HTMLElement
+			if (isTyping(el)) return
+			const s = useStore.getState()
+			if (e.code === "Space") {
+				e.preventDefault()
+				// a focused button would also "click" on Space; drop the focus so only we handle it
+				if (el.tagName === "BUTTON") el.blur()
+				if (s.mode === "cues") s.goNext()
+				else s.togglePlay()
+				return
+			}
+			if (s.mode === "cues") {
+				if (el.tagName === "INPUT") return // arrows belong to a focused slider
+				if (e.key === "ArrowRight") s.goNext()
+				else if (e.key === "ArrowLeft") s.goBack()
+				else if (e.key === "Delete" && s.selectedCueId) s.removeCue(s.selectedCueId)
+				return
+			}
+			if (e.key === "s" || e.key === "S") {
+				if (s.selectedClipId) s.splitClip(s.selectedClipId, s.playhead)
+			} else if (e.key === "Delete" || e.key === "Backspace") {
+				if (s.selectedClipId) s.removeClip(s.selectedClipId)
+				else if (s.selectedAudioId) s.removeAudioClip(s.selectedAudioId)
+			} else if (e.key === "Home") {
+				s.setPlayhead(0)
+			}
+		}
+		const onKeyUp = (e: KeyboardEvent): void => {
+			if (e.code === "Space" && !isTyping(e.target as HTMLElement)) e.preventDefault()
+		}
+		window.addEventListener("keydown", onKey)
+		window.addEventListener("keyup", onKeyUp)
+		return () => {
+			window.removeEventListener("keydown", onKey)
+			window.removeEventListener("keyup", onKeyUp)
+		}
+	}, [])
+}
+
+/** The stage, with the reference video beside it (or above it, in a narrow window) when there is one. */
+function Center(): React.JSX.Element {
+	const showVideo = useStore((s) => !!s.reference?.visible)
+	return (
+		<div className="@container flex min-h-0 min-w-0 flex-col gap-px bg-line @3xl:flex-row">
+			{showVideo && <ReferencePanel />}
+			<StagePreview />
+		</div>
+	)
+}
+
+export function App(): React.JSX.Element {
+	usePersistence()
+	useDmxOutput()
+	useTransport()
+	useCueFade()
+	useShortcuts()
+	const mode = useStore((s) => s.mode)
+	return (
+		<div className="grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_minmax(220px,36vh)] gap-px overflow-hidden bg-line">
+			<TopBar />
+			<div className="grid min-h-0 grid-cols-[minmax(200px,320px)_minmax(0,1fr)_minmax(220px,340px)] gap-px">
+				<AssetDrawer />
+				<Center />
+				<Inspector />
+			</div>
+			{mode === "timeline" ? <Timeline /> : <CuePanel />}
+		</div>
+	)
+}

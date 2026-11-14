@@ -1,0 +1,36 @@
+{
+	"name": "dmx-studio",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Easy light-show maker for DMX fixtures",
+	"main": "electron/main.cjs",
+	"scripts": {
+		"dev": "concurrently -k -n vite,electron \"vite\" \"wait-on tcp:5173 && electron .\"",
+		"build": "tsc --noEmit && vite build",
+		"start": "vite build && electron .",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1",
+		"serialport": "^12.0.0",
+		"zustand": "^5.0.0"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.0.0",
+		"@types/react": "^18.3.12",
+		"@types/react-dom": "^18.3.1",
+		"@vitejs/plugin-react": "^4.3.4",
+		"concurrently": "^9.1.0",
+		"electron": "^33.2.0",
+		"tailwindcss": "^4.0.0",
+		"typescript": "^5.6.3",
+		"vite": "^6.0.0",
+		"wait-on": "^8.0.1"
+	},
+	"allowScripts": {
+		"electron@33.4.11": true,
+		"@serialport/bindings-cpp@12.0.1": true,
+		"esbuild@0.25.12": true
+	}
+}
