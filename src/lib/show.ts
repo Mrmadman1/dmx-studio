@@ -31,14 +31,47 @@ const ease = (x: number, curve: Curve): number => {
 	return curve === "smooth" ? c * c * (3 - 2 * c) : c
 }
 
+/** 0..1 shape of a block of time: ramps up over fadeIn, holds, ramps down over fadeOut, 0 outside it. */
+function envelope(start: number, duration: number, fadeIn: number, fadeOut: number, curve: Curve, t: number): number {
+	const end = start + duration
+	if (t < start || t >= end) return 0
+	let env = 1
+	if (fadeIn > 0 && t < start + fadeIn) env = Math.min(env, ease((t - start) / fadeIn, curve))
+	if (fadeOut > 0 && t > end - fadeOut) env = Math.min(env, ease((end - t) / fadeOut, curve))
+	return env
+}
+
 /** 0..1 brightness of a clip at time t, including its fades. */
 export function clipLevel(c: Clip, t: number): number {
-	const end = c.start + c.duration
-	if (t < c.start || t >= end) return 0
-	let env = 1
-	if (c.fadeIn > 0 && t < c.start + c.fadeIn) env = Math.min(env, ease((t - c.start) / c.fadeIn, c.curve))
-	if (c.fadeOut > 0 && t > end - c.fadeOut) env = Math.min(env, ease((end - t) / c.fadeOut, c.curve))
-	return env * c.intensity
+	return envelope(c.start, c.duration, c.fadeIn, c.fadeOut, c.curve, t) * c.intensity
+}
+
+/**
+ * A brightness bump at a point in the show: for `duration` seconds it adds `amount` (0..1) to the
+ * brightness of whatever the lights are playing, shaped by the fades, then lets go. Good for
+ * hitting a drum or a downbeat harder without rewriting the clips underneath.
+ */
+export interface Accent {
+	id: string
+	start: number
+	duration: number
+	/** brightness added at full strength, as a fraction of full: 0.4 = "+40%" */
+	amount: number
+	fadeIn: number
+	fadeOut: number
+	curve: Curve
+	/** which lights it hits; null = every light */
+	fixtureIds: string[] | null
+}
+
+/** Total brightness added to a fixture at time t by every accent that's active (overlaps stack). */
+export function accentBoost(accents: Accent[], fixtureId: string, t: number): number {
+	let sum = 0
+	for (const a of accents) {
+		if (a.fixtureIds && !a.fixtureIds.includes(fixtureId)) continue
+		sum += envelope(a.start, a.duration, a.fadeIn, a.fadeOut, a.curve, t) * a.amount
+	}
+	return sum
 }
 
 export function projectEnd(clips: Clip[]): number {
@@ -53,13 +86,15 @@ export function showEnd(clips: Clip[], audio: { start: number; duration: number 
 /**
  * The channel values a fixture actually sends at time t. A fixture with no clips is
  * fully manual; once it has clips the timeline owns its dimmer and colour channels
- * (black between clips) and the rest (strobe, macro, speed) stay on the faders.
+ * (black between clips) and the rest (strobe, macro, speed) stay on the faders. Accents only
+ * brighten lights that have clips.
  */
-export function effectiveValues(f: Fixture, clips: Clip[], t: number): number[] {
+export function effectiveValues(f: Fixture, clips: Clip[], t: number, accents: Accent[] = []): number[] {
 	const own = clips.filter((c) => c.fixtureId === f.id)
 	if (own.length === 0) return f.values
 	const active = own.find((c) => t >= c.start && t < c.start + c.duration)
-	const level = active ? clipLevel(active, t) : 0
+	// accents brighten what a clip is playing; between clips the light stays dark
+	const level = active ? Math.min(1, clipLevel(active, t) + accentBoost(accents, f.id, t)) : 0
 	const channels = profileById(f.profileId).channels
 	const hasDimmer = channels.some((c) => c.kind === "dimmer")
 	const values = f.values.slice()

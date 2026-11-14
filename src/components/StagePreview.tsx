@@ -37,13 +37,14 @@ export function StagePreview(): React.JSX.Element {
 			const state = useStore.getState()
 			const { fixtures, selectedId, blackout, mode } = state
 			const clips = mode === "timeline" ? state.clips : []
+			const accents = mode === "timeline" ? state.accents : []
 			const playhead = lightTime(state)
 			// scale everything with the slot so lights shrink instead of overlapping or clipping
 			const k = Math.max(0.35, Math.min(slotWidth(fixtures.length, w) / MAX_SLOT, (h * 0.5) / 120))
 			fixtures.forEach((f, i) => {
 				const cx = slotX(i, fixtures.length, w)
 				const cy = h * 0.5
-				const c = previewColor(f, effectiveValues(f, clips, playhead))
+				const c = previewColor(f, effectiveValues(f, clips, playhead, accents))
 				const lit = blackout ? 0 : c.intensity
 				const rgb = `${c.r},${c.g},${c.b}`
 				// glow

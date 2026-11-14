@@ -19,6 +19,7 @@ export function toProject(): ProjectData {
 		mode: s.mode,
 		currentCue: s.currentCue,
 		reference: s.reference,
+		accents: s.accents,
 	}
 }
 
@@ -79,7 +80,8 @@ export function usePersistence(): void {
 					s.snap !== prev.snap ||
 					s.mode !== prev.mode ||
 					s.currentCue !== prev.currentCue ||
-					s.reference !== prev.reference
+					s.reference !== prev.reference ||
+					s.accents !== prev.accents
 				if (!changed) return
 				clearTimeout(timer)
 				timer = setTimeout(flush, 800)

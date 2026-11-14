@@ -1,7 +1,7 @@
 import { create } from "zustand"
 
 import { profileById } from "./profiles"
-import { type Clip, MIN_CLIP, effectiveValues, showEnd } from "./show"
+import { type Accent, type Clip, MIN_CLIP, effectiveValues, showEnd } from "./show"
 
 export interface Fixture {
 	id: string
@@ -36,6 +36,15 @@ export interface AudioClip {
 
 export type AudioStatus = "loading" | "ready" | "missing"
 
+/** What Copy / Cut last took from the timeline (kept in the app, not the system clipboard). */
+export interface Clipboard {
+	clips: Clip[]
+	accents: Accent[]
+	audio: AudioClip[]
+	/** each copied clip's track position (index into the lights list) when it was copied, so a paste can keep the layout */
+	trackOf: Record<string, number>
+}
+
 /** A video to copy the lighting from (concert footage). It plays in step with the timeline. */
 export interface Reference {
 	path: string
@@ -46,6 +55,32 @@ export interface Reference {
 	/** silence the video's own sound */
 	muted: boolean
 	visible: boolean
+}
+
+/** Rebuild saved accents defensively: drop junk, clamp numbers, keep fades inside the accent. */
+function validAccents(list: unknown): Accent[] {
+	if (!Array.isArray(list)) return []
+	return list.flatMap((raw: unknown): Accent[] => {
+		if (!raw || typeof raw !== "object") return []
+		const a = raw as Partial<Accent>
+		if (typeof a.id !== "string" || !Number.isFinite(a.start) || !Number.isFinite(a.duration)) return []
+		const num = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback)
+		const duration = Math.max(MIN_CLIP, a.duration as number)
+		const fadeIn = clamp(num(a.fadeIn, 0), 0, duration)
+		const ids = Array.isArray(a.fixtureIds) ? a.fixtureIds.filter((x): x is string => typeof x === "string") : null
+		return [
+			{
+				id: a.id,
+				start: Math.max(0, a.start as number),
+				duration,
+				amount: clamp(num(a.amount, 0.5), 0, 1),
+				fadeIn,
+				fadeOut: clamp(num(a.fadeOut, 0), 0, duration - fadeIn),
+				curve: a.curve === "linear" ? "linear" : "smooth",
+				fixtureIds: ids && ids.length ? ids : null,
+			},
+		]
+	})
 }
 
 function validReference(r: unknown): Reference | null {
@@ -75,6 +110,7 @@ export interface ProjectData {
 	mode: "timeline" | "cues"
 	currentCue: number
 	reference: Reference | null
+	accents: Accent[]
 }
 
 type Looks = Record<string, number[]>
@@ -99,6 +135,11 @@ interface State {
 	deviceLatencySec: number
 	audioStatus: Record<string, AudioStatus>
 	reference: Reference | null
+	accents: Accent[]
+	selectedAccentId: string | null
+	clipboard: Clipboard | null
+	/** every selected timeline item (clips, accents, audio). The single-selection ids below mirror it when exactly one is selected. */
+	selection: string[]
 
 	clips: Clip[]
 	selectedClipId: string | null
@@ -158,6 +199,30 @@ interface State {
 	loadProject: (p: Partial<ProjectData>) => void
 	setReference: (r: Reference | null) => void
 	updateReference: (patch: Partial<Reference>) => void
+
+	addAccent: (at: number) => void
+	removeAccent: (id: string) => void
+	selectAccent: (id: string | null) => void
+	updateAccent: (id: string, patch: Partial<Omit<Accent, "id">>) => void
+
+	setSelection: (ids: string[]) => void
+	toggleSelected: (id: string) => void
+	selectAll: () => void
+	deleteSelection: () => void
+	splitSelection: (at: number) => void
+	/** move every item in `initial` (id -> its start when the drag began) by `delta` seconds; `collide` stops clips running into others */
+	moveSelection: (initial: Record<string, number>, delta: number, collide: boolean) => void
+	/** drop a copy of each item exactly where it is and select the copies; returns original id -> copy id */
+	copySelectionInPlace: (ids: string[]) => Record<string, string>
+	/** after dropping copies: push them right if they landed on existing clips */
+	settleClips: (ids: string[]) => void
+
+	copySelection: () => void
+	cutSelection: () => void
+	/** paste at the playhead, keeping the items' spacing (light clips go on the selected light's track) */
+	pasteClipboard: () => void
+	/** copy the selection and place it straight after the original */
+	duplicateSelection: () => void
 }
 
 /**
@@ -221,7 +286,7 @@ function bounds(clips: Clip[], c: Clip): { min: number; max: number } {
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 
 /** keep fadeIn + fadeOut inside the clip's length */
-function fit(c: Clip): Clip {
+function fit<T extends { duration: number; fadeIn: number; fadeOut: number }>(c: T): T {
 	const fadeIn = clamp(c.fadeIn, 0, c.duration)
 	return { ...c, fadeIn, fadeOut: clamp(c.fadeOut, 0, c.duration - fadeIn) }
 }
@@ -238,11 +303,131 @@ let counter = 1
 let clipCounter = 1
 let cueCounter = 1
 let audioCounter = 1
+let accentCounter = 1
 
 const patchClip = (clips: Clip[], id: string, fn: (c: Clip) => Clip): Clip[] =>
 	clips.map((c) => (c.id === id ? fn(c) : c))
 
-export const useStore = create<State>((set, get) => ({
+const nextClipId = (): string => `clip${Date.now()}${clipCounter++}`
+const nextAccentId = (): string => `acc${Date.now()}${accentCounter++}`
+const nextAudioId = (): string => `aud${Date.now()}${audioCounter++}`
+
+/**
+ * Keep the single-selection ids (used by the inspector) and the multi-selection list in step, whichever
+ * one an update touches: an explicit list derives the single ids (set only when exactly one item is
+ * selected), and touching a single id rebuilds the list from them.
+ */
+function syncSelection(s: State, p: Partial<State>): Partial<State> {
+	if (p.selection) {
+		const one = p.selection.length === 1 ? p.selection[0] : null
+		const clip = one ? (p.clips ?? s.clips).find((c) => c.id === one) : undefined
+		return {
+			...p,
+			selectedClipId: clip ? clip.id : null,
+			selectedAudioId: one && (p.audioClips ?? s.audioClips).some((a) => a.id === one) ? one : null,
+			selectedAccentId: one && (p.accents ?? s.accents).some((a) => a.id === one) ? one : null,
+			...(clip ? { selectedId: clip.fixtureId } : {}),
+		}
+	}
+	if ("selectedClipId" in p || "selectedAudioId" in p || "selectedAccentId" in p) {
+		const pick = (k: "selectedClipId" | "selectedAudioId" | "selectedAccentId"): string | null =>
+			(k in p ? p[k] : s[k]) ?? null
+		const ids = [pick("selectedClipId"), pick("selectedAudioId"), pick("selectedAccentId")]
+		return { ...p, selection: ids.filter((x): x is string => !!x) }
+	}
+	return p
+}
+
+/** The selected items, copied out so they can be pasted or duplicated later. */
+function snapshotSelection(s: State): Clipboard | null {
+	const ids = new Set(s.selection)
+	const clips = s.clips.filter((c) => ids.has(c.id))
+	const accents = s.accents.filter((a) => ids.has(a.id))
+	const audio = s.audioClips.filter((a) => ids.has(a.id))
+	if (!clips.length && !accents.length && !audio.length) return null
+	const trackOf: Record<string, number> = {}
+	for (const c of clips) trackOf[c.id] = s.fixtures.findIndex((f) => f.id === c.fixtureId)
+	return {
+		clips: clips.map((c) => ({ ...c })),
+		accents: accents.map((a) => ({ ...a, fixtureIds: a.fixtureIds?.slice() ?? null })),
+		audio: audio.map((a) => ({ ...a, beats: a.beats?.slice() })),
+		trackOf,
+	}
+}
+
+/** How far to push a group of clips right so none of them touches a clip already on its track. */
+function clearanceShift(movers: Clip[], existing: Clip[]): number {
+	let shift = 0
+	for (let guard = 0; guard < 10000; guard++) {
+		let next = shift
+		for (const c of movers) {
+			const cs = c.start + shift
+			for (const o of existing) {
+				if (o.fixtureId !== c.fixtureId) continue
+				if (cs < o.start + o.duration - 1e-9 && cs + c.duration > o.start + 1e-9) {
+					next = Math.max(next, o.start + o.duration - c.start)
+				}
+			}
+		}
+		if (next === shift) return shift
+		shift = next
+	}
+	return shift
+}
+
+/**
+ * Lay a copied group down with its earliest item at `at`, keeping every item's spacing. Light clips
+ * keep their relative track layout: with `useSelectedTrack` the top-most copied clip lands on the
+ * selected light and the rest keep their offset below it; otherwise each goes back on its own light.
+ * The whole group is pushed right, as one piece, until none of it lands on an existing clip.
+ */
+function placeGroup(
+	s: State,
+	cb: Clipboard,
+	at: number,
+	useSelectedTrack: boolean,
+): { clips: Clip[]; accents: Accent[]; audio: AudioClip[]; end: number } | null {
+	const starts = [...cb.clips, ...cb.accents, ...cb.audio].map((x) => x.start)
+	if (!starts.length) return null
+	const offset = Math.max(0, at) - Math.min(...starts)
+	const n = s.fixtures.length
+	const indexOf = new Map(s.fixtures.map((f, i) => [f.id, i]))
+	const selectedIdx = useSelectedTrack && s.selectedId ? indexOf.get(s.selectedId) : undefined
+	const minTrack = cb.clips.length ? Math.min(...cb.clips.map((c) => cb.trackOf[c.id] ?? 0)) : 0
+
+	const clips: Clip[] =
+		n === 0
+			? []
+			: cb.clips.map((c) => {
+					const track = cb.trackOf[c.id] ?? 0
+					const fixtureId =
+						selectedIdx !== undefined
+							? s.fixtures[clamp(selectedIdx + track - minTrack, 0, n - 1)].id
+							: indexOf.has(c.fixtureId)
+								? c.fixtureId
+								: s.fixtures[clamp(track, 0, n - 1)].id
+					// a pasted copy is hand-made: it must not be swept up by "Clear flashes"
+					return { ...c, id: nextClipId(), fixtureId, start: c.start + offset, source: undefined }
+				})
+	const shift = clearanceShift(clips, s.clips)
+	const placedClips = clips.map((c) => ({ ...c, start: c.start + shift }))
+	const accents = cb.accents.map((a) => ({
+		...a,
+		id: nextAccentId(),
+		start: a.start + offset + shift,
+		fixtureIds: a.fixtureIds?.slice() ?? null,
+	}))
+	const audio = cb.audio.map((a) => ({ ...a, id: nextAudioId(), start: a.start + offset + shift, beats: a.beats?.slice() }))
+	const placed = [...placedClips, ...accents, ...audio]
+	if (!placed.length) return null // e.g. only clips were copied and there are no lights to put them on
+	return { clips: placedClips, accents, audio, end: Math.max(...placed.map((x) => x.start + x.duration)) }
+}
+
+export const useStore = create<State>((rawSet, get) => {
+	/** every update goes through here, so the single-selection ids and the selection list never disagree */
+	const set = (partial: Partial<State> | ((s: State) => Partial<State>)): void =>
+		rawSet((s) => syncSelection(s, typeof partial === "function" ? partial(s) : partial))
+	return {
 	fixtures: [],
 	selectedId: null,
 	blackout: false,
@@ -257,6 +442,10 @@ export const useStore = create<State>((set, get) => ({
 	deviceLatencySec: 0,
 	audioStatus: {},
 	reference: null,
+	accents: [],
+	selectedAccentId: null,
+	clipboard: null,
+	selection: [],
 	clips: [],
 	selectedClipId: null,
 	playhead: 0,
@@ -280,6 +469,12 @@ export const useStore = create<State>((set, get) => ({
 		set((s) => ({
 			fixtures: s.fixtures.filter((f) => f.id !== id),
 			clips: s.clips.filter((c) => c.fixtureId !== id),
+			// an accent aimed only at this light has nothing left to hit
+			accents: s.accents.flatMap((a) => {
+				if (!a.fixtureIds) return [a]
+				const ids = a.fixtureIds.filter((x) => x !== id)
+				return ids.length ? [{ ...a, fixtureIds: ids }] : []
+			}),
 			selectedId: s.selectedId === id ? null : s.selectedId,
 			selectedClipId: s.clips.some((c) => c.id === s.selectedClipId && c.fixtureId === id)
 				? null
@@ -356,6 +551,7 @@ export const useStore = create<State>((set, get) => ({
 			return {
 				selectedClipId: id,
 				selectedAudioId: id ? null : s.selectedAudioId,
+				selectedAccentId: id ? null : s.selectedAccentId,
 				selectedId: clip ? clip.fixtureId : s.selectedId,
 			}
 		}),
@@ -525,7 +721,11 @@ export const useStore = create<State>((set, get) => ({
 			audioClips: s.audioClips.map((a) => (a.id === id ? { ...a, start: Math.max(0, start) } : a)),
 		})),
 	selectAudio: (id) =>
-		set((s) => ({ selectedAudioId: id, selectedClipId: id ? null : s.selectedClipId })),
+		set((s) => ({
+			selectedAudioId: id,
+			selectedClipId: id ? null : s.selectedClipId,
+			selectedAccentId: id ? null : s.selectedAccentId,
+		})),
 	setAudioBeats: (id, bpm, beats) =>
 		set((s) => ({ audioClips: s.audioClips.map((a) => (a.id === id ? { ...a, bpm, beats } : a)) })),
 	setLatencyMs: (ms) => set({ latencyMs: clamp(Math.round(ms), -500, 1500) }),
@@ -573,6 +773,163 @@ export const useStore = create<State>((set, get) => ({
 			return { clips, selectedClipId: gone ? null : s.selectedClipId }
 		}),
 
+	addAccent: (at) =>
+		set((s) => {
+			const accent: Accent = {
+				id: `acc${Date.now()}${accentCounter++}`,
+				start: Math.max(0, at),
+				duration: 1,
+				amount: 0.5,
+				fadeIn: 0.05, // a quick hit...
+				fadeOut: 0.4, // ...that settles back
+				curve: "smooth",
+				fixtureIds: null,
+			}
+			return {
+				accents: [...s.accents, accent],
+				selectedAccentId: accent.id,
+				selectedClipId: null,
+				selectedAudioId: null,
+			}
+		}),
+	removeAccent: (id) =>
+		set((s) => ({
+			accents: s.accents.filter((a) => a.id !== id),
+			selectedAccentId: s.selectedAccentId === id ? null : s.selectedAccentId,
+		})),
+	selectAccent: (id) =>
+		set((s) => ({
+			selectedAccentId: id,
+			selectedClipId: id ? null : s.selectedClipId,
+			selectedAudioId: id ? null : s.selectedAudioId,
+		})),
+	updateAccent: (id, patch) =>
+		set((s) => ({
+			accents: s.accents.map((a) => {
+				if (a.id !== id) return a
+				const next = { ...a, ...patch }
+				next.start = Math.max(0, next.start)
+				next.duration = Math.max(MIN_CLIP, next.duration)
+				next.amount = clamp(next.amount, 0, 1)
+				// the fade being dragged wins; the other gives way
+				if (patch.fadeIn !== undefined) next.fadeIn = clamp(patch.fadeIn, 0, next.duration - (patch.fadeOut ?? a.fadeOut))
+				if (patch.fadeOut !== undefined) next.fadeOut = clamp(patch.fadeOut, 0, next.duration - next.fadeIn)
+				return fit(next)
+			}),
+		})),
+
+	setSelection: (ids) => set({ selection: ids }),
+	toggleSelected: (id) =>
+		set((s) => ({ selection: s.selection.includes(id) ? s.selection.filter((x) => x !== id) : [...s.selection, id] })),
+	selectAll: () =>
+		set((s) => ({ selection: [...s.clips.map((c) => c.id), ...s.accents.map((a) => a.id), ...s.audioClips.map((a) => a.id)] })),
+	deleteSelection: () =>
+		set((s) => {
+			const ids = new Set(s.selection)
+			return {
+				clips: s.clips.filter((c) => !ids.has(c.id)),
+				accents: s.accents.filter((a) => !ids.has(a.id)),
+				audioClips: s.audioClips.filter((a) => !ids.has(a.id)),
+				selection: [],
+			}
+		}),
+	splitSelection: (at) => {
+		const s = get()
+		for (const id of s.selection) if (s.clips.some((c) => c.id === id)) s.splitClip(id, at)
+	},
+	moveSelection: (initial, delta, collide) =>
+		set((s) => {
+			const moving = new Set(Object.keys(initial))
+			let lo = Number.NEGATIVE_INFINITY
+			let hi = Number.POSITIVE_INFINITY
+			for (const id of moving) lo = Math.max(lo, -initial[id]) // nothing may go before 0
+			if (collide) {
+				// clips can't run into clips that aren't coming along
+				for (const c of s.clips) {
+					if (!moving.has(c.id)) continue
+					const s0 = initial[c.id]
+					const e0 = s0 + c.duration
+					for (const o of s.clips) {
+						if (o.fixtureId !== c.fixtureId || moving.has(o.id)) continue
+						if (o.start + o.duration <= s0 + 1e-6) lo = Math.max(lo, o.start + o.duration - s0)
+						else if (o.start >= e0 - 1e-6) hi = Math.min(hi, o.start - e0)
+					}
+				}
+			}
+			const d = clamp(delta, lo, hi)
+			const at = <T extends { id: string; start: number }>(x: T): T => (moving.has(x.id) ? { ...x, start: initial[x.id] + d } : x)
+			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at) }
+		}),
+	copySelectionInPlace: (ids) => {
+		const s = get()
+		const want = new Set(ids)
+		const map: Record<string, string> = {}
+		const clips = s.clips.filter((c) => want.has(c.id)).map((c) => ({ ...c, id: (map[c.id] = nextClipId()), source: undefined }))
+		const accents = s.accents
+			.filter((a) => want.has(a.id))
+			.map((a) => ({ ...a, id: (map[a.id] = nextAccentId()), fixtureIds: a.fixtureIds?.slice() ?? null }))
+		const audio = s.audioClips
+			.filter((a) => want.has(a.id))
+			.map((a) => ({ ...a, id: (map[a.id] = nextAudioId()), beats: a.beats?.slice() }))
+		set({
+			clips: [...s.clips, ...clips],
+			accents: [...s.accents, ...accents],
+			audioClips: [...s.audioClips, ...audio],
+			selection: Object.values(map),
+		})
+		return map
+	},
+	settleClips: (ids) =>
+		set((s) => {
+			const moving = new Set(ids)
+			const shift = clearanceShift(
+				s.clips.filter((c) => moving.has(c.id)),
+				s.clips.filter((c) => !moving.has(c.id)),
+			)
+			if (shift === 0) return {}
+			const at = <T extends { id: string; start: number }>(x: T): T => (moving.has(x.id) ? { ...x, start: x.start + shift } : x)
+			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at) }
+		}),
+
+	copySelection: () => {
+		const cb = snapshotSelection(get())
+		if (cb) set({ clipboard: cb })
+	},
+	cutSelection: () => {
+		const s = get()
+		if (!snapshotSelection(s)) return
+		s.copySelection()
+		s.deleteSelection()
+	},
+	pasteClipboard: () =>
+		set((s) => {
+			if (!s.clipboard) return {}
+			const placed = placeGroup(s, s.clipboard, Math.max(0, lightTime(s)), true)
+			if (!placed) return {}
+			return {
+				clips: [...s.clips, ...placed.clips],
+				accents: [...s.accents, ...placed.accents],
+				audioClips: [...s.audioClips, ...placed.audio],
+				selection: [...placed.clips, ...placed.accents, ...placed.audio].map((x) => x.id),
+				// move past the paste so the next one chains on (but never shove the playhead during playback)
+				...(s.playing ? {} : { playhead: placed.end }),
+			}
+		}),
+	duplicateSelection: () =>
+		set((s) => {
+			const cb = snapshotSelection(s)
+			if (!cb) return {}
+			const end = Math.max(...[...cb.clips, ...cb.accents, ...cb.audio].map((x) => x.start + x.duration))
+			const placed = placeGroup(s, cb, end, false)
+			if (!placed) return {}
+			return {
+				clips: [...s.clips, ...placed.clips],
+				accents: [...s.accents, ...placed.accents],
+				audioClips: [...s.audioClips, ...placed.audio],
+				selection: [...placed.clips, ...placed.accents, ...placed.audio].map((x) => x.id),
+			}
+		}),
+
 	setReference: (reference) => set({ reference }),
 	updateReference: (patch) => set((s) => (s.reference ? { reference: { ...s.reference, ...patch } } : {})),
 
@@ -588,6 +945,9 @@ export const useStore = create<State>((set, get) => ({
 			mode: p.mode === "cues" ? "cues" : "timeline",
 			currentCue: Number.isInteger(p.currentCue) ? (p.currentCue as number) : -1,
 			reference: validReference(p.reference),
+			accents: validAccents(p.accents),
+			selectedAccentId: null,
+			clipboard: null,
 			// everything that only makes sense mid-session starts fresh
 			selectedId: null,
 			selectedClipId: null,
@@ -598,14 +958,21 @@ export const useStore = create<State>((set, get) => ({
 			fading: null,
 			blackout: false,
 		}),
-}))
+	}
+})
 
 /** Collapse every fixture into the 512 DMX slots that go on the wire. */
-export function buildUniverse(fixtures: Fixture[], clips: Clip[], t: number, blackout: boolean): Uint8Array {
+export function buildUniverse(
+	fixtures: Fixture[],
+	clips: Clip[],
+	accents: Accent[],
+	t: number,
+	blackout: boolean,
+): Uint8Array {
 	const out = new Uint8Array(512)
 	if (blackout) return out
 	for (const f of fixtures) {
-		effectiveValues(f, clips, t).forEach((v, i) => {
+		effectiveValues(f, clips, t, accents).forEach((v, i) => {
 			const slot = f.address - 1 + i
 			if (slot >= 0 && slot < 512) out[slot] = v
 		})

@@ -18,8 +18,16 @@ function useDmxOutput(): void {
 		const push = (): void => {
 			const s = useStore.getState()
 			// the timeline's clips only drive the lights in timeline mode; cue mode writes values directly
-			const clips = s.mode === "timeline" ? s.clips : []
-			window.dmx?.sendFrame(buildUniverse(s.fixtures, clips, lightTime(s), s.blackout))
+			const inTimeline = s.mode === "timeline"
+			window.dmx?.sendFrame(
+				buildUniverse(
+					s.fixtures,
+					inTimeline ? s.clips : [],
+					inTimeline ? s.accents : [],
+					lightTime(s),
+					s.blackout,
+				),
+			)
 		}
 		push()
 		return useStore.subscribe(push)
@@ -87,6 +95,20 @@ function useShortcuts(): void {
 			const el = e.target as HTMLElement
 			if (isTyping(el)) return
 			const s = useStore.getState()
+			if (e.ctrlKey || e.metaKey) {
+				// Ctrl+C / X / V / D on the timeline (never while typing in a box, so text copy still works)
+				if (e.altKey || s.mode !== "timeline") return
+				const key = e.key.toLowerCase()
+				if (key === "a") s.selectAll()
+				else if (key === "c") s.copySelection()
+				else if (key === "x") s.cutSelection()
+				else if (key === "v") s.pasteClipboard()
+				else if (key === "d") s.duplicateSelection()
+				else return
+				e.preventDefault()
+				return
+			}
+			if (e.altKey) return
 			if (e.code === "Space") {
 				e.preventDefault()
 				// a focused button would also "click" on Space; drop the focus so only we handle it
@@ -103,10 +125,14 @@ function useShortcuts(): void {
 				return
 			}
 			if (e.key === "s" || e.key === "S") {
-				if (s.selectedClipId) s.splitClip(s.selectedClipId, s.playhead)
+				s.splitSelection(s.playhead)
 			} else if (e.key === "Delete" || e.key === "Backspace") {
-				if (s.selectedClipId) s.removeClip(s.selectedClipId)
-				else if (s.selectedAudioId) s.removeAudioClip(s.selectedAudioId)
+				s.deleteSelection()
+			} else if (e.key === "Escape") {
+				s.setSelection([])
+			} else if (e.key === "a" || e.key === "A") {
+				// tap A on a hit while the song plays: it lands where you HEARD it (lightTime), not where the audio is scheduled
+				s.addAccent(Math.max(0, lightTime(s)))
 			} else if (e.key === "Home") {
 				s.setPlayhead(0)
 			}

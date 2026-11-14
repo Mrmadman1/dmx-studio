@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react"
 
 import { addAudioFromPath, getLoaded, pickAudioFiles } from "../lib/audio"
 import { loadReferenceFromPath } from "../lib/reference"
-import { type Clip, showEnd } from "../lib/show"
-import { type AudioClip, type Reference, mediaSpans, useStore } from "../lib/store"
+import { type Accent, type Clip, showEnd } from "../lib/show"
+import { type AudioClip, type Reference, lightTime, mediaSpans, useStore } from "../lib/store"
 
 const LABEL_W = 150
 const RULER_H = 26
@@ -16,6 +16,8 @@ const TILE_W = 4096
 const AUDIO_FILE = /\.(mp3|wav|ogg|flac|m4a|aac|opus)$/i
 const VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv)$/i
 const VIDEO_H = 40
+const ACCENT_H = 34
+const ACCENT_COLOR = "255,176,46"
 
 function fmt(t: number): string {
 	const m = Math.floor(t / 60)
@@ -23,18 +25,22 @@ function fmt(t: number): string {
 }
 
 /** Snap a time to the playhead, zero, every clip edge and every detected beat when close enough on screen. */
-function snapTime(t: number, excludeId?: string): number {
-	const { clips, audioClips, reference, playhead, snap, zoom } = useStore.getState()
+function snapTime(t: number, exclude?: string | string[]): number {
+	const { clips, accents, audioClips, reference, playhead, snap, zoom } = useStore.getState()
 	if (!snap) return t
+	const skip = new Set(Array.isArray(exclude) ? exclude : exclude ? [exclude] : [])
 	const points = [0, playhead]
 	for (const c of clips) {
-		if (c.id !== excludeId) points.push(c.start, c.start + c.duration)
+		if (!skip.has(c.id)) points.push(c.start, c.start + c.duration)
 	}
 	for (const a of audioClips) {
-		if (a.id !== excludeId) points.push(a.start, a.start + a.duration)
+		if (!skip.has(a.id)) points.push(a.start, a.start + a.duration)
 		for (const b of a.beats ?? []) points.push(a.start + b)
 	}
-	if (reference && excludeId !== "video") points.push(reference.start, reference.start + reference.duration)
+	if (reference && !skip.has("video")) points.push(reference.start, reference.start + reference.duration)
+	for (const a of accents) {
+		if (!skip.has(a.id)) points.push(a.start, a.start + a.duration)
+	}
 	let best = t
 	let bestDist = 8 / zoom
 	for (const p of points) {
@@ -60,20 +66,104 @@ function startDrag(e: React.PointerEvent, onMove: (dx: number, ev: PointerEvent)
 	window.addEventListener("pointerup", up)
 }
 
+const itemStart = (id: string): number | undefined => {
+	const s = useStore.getState()
+	return (s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id))?.start
+}
+const itemDuration = (id: string): number => {
+	const s = useStore.getState()
+	return (s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id))?.duration ?? 0
+}
+
+/**
+ * Press on a clip, accent or audio clip. Shift/Ctrl-click adds or removes it from the selection.
+ * Otherwise it (or the whole selected group, if it's part of one) can be dragged; hold Alt to drag
+ * copies instead.
+ */
+function itemPointerDown(e: React.PointerEvent, id: string): void {
+	if (e.button !== 0) return
+	const s = useStore.getState()
+	if (e.shiftKey || e.ctrlKey || e.metaKey) {
+		e.preventDefault()
+		e.stopPropagation()
+		s.toggleSelected(id)
+		return
+	}
+	if (!s.selection.includes(id)) s.setSelection([id])
+	startGroupDrag(e, id)
+}
+
+function startGroupDrag(e: React.PointerEvent, grabbedId: string): void {
+	e.preventDefault()
+	e.stopPropagation()
+	const copy = e.altKey
+	const x0 = e.clientX
+	let ids = useStore.getState().selection.slice()
+	let grabbed = grabbedId
+	const initial: Record<string, number> = {}
+	const record = (): void => {
+		for (const k of Object.keys(initial)) delete initial[k]
+		for (const id of ids) {
+			const start = itemStart(id)
+			if (start !== undefined) initial[id] = start
+		}
+	}
+	record()
+	let moved = false
+	let copied = false
+
+	const move = (ev: PointerEvent): void => {
+		const dx = ev.clientX - x0
+		if (!moved) {
+			if (Math.abs(dx) < 3) return // a click shouldn't nudge anything
+			moved = true
+		}
+		if (copy && !copied) {
+			// leave the originals where they are and carry copies instead
+			copied = true
+			const map = useStore.getState().copySelectionInPlace(ids)
+			grabbed = map[grabbedId] ?? grabbed
+			ids = Object.values(map)
+			record()
+		}
+		const s0 = initial[grabbed]
+		if (s0 === undefined) return
+		const dur = itemDuration(grabbed)
+		const raw = s0 + dx / useStore.getState().zoom
+		const a = snapTime(raw, ids)
+		const b = snapTime(raw + dur, ids) - dur
+		const target = Math.abs(a - raw) <= Math.abs(b - raw) ? a : b
+		useStore.getState().moveSelection(initial, target - s0, !copy)
+	}
+	const up = (): void => {
+		window.removeEventListener("pointermove", move)
+		window.removeEventListener("pointerup", up)
+		const s = useStore.getState()
+		if (copied) s.settleClips(ids) // dropped copies that landed on clips get pushed clear
+		else if (!moved && ids.length > 1) s.setSelection([grabbedId]) // plain click on one of a group: just that one
+	}
+	window.addEventListener("pointermove", move)
+	window.addEventListener("pointerup", up)
+}
+
 export function Timeline(): React.JSX.Element {
 	const fixtures = useStore((s) => s.fixtures)
 	const clips = useStore((s) => s.clips)
 	const audioClips = useStore((s) => s.audioClips)
 	const reference = useStore((s) => s.reference)
+	const accents = useStore((s) => s.accents)
+	const selection = useStore((s) => s.selection)
+	const hasClipboard = useStore((s) => s.clipboard !== null)
 	const playhead = useStore((s) => s.playhead)
 	const playing = useStore((s) => s.playing)
 	const zoom = useStore((s) => s.zoom)
 	const snapOn = useStore((s) => s.snap)
 	const latencyMs = useStore((s) => s.latencyMs)
 	const selectedClipId = useStore((s) => s.selectedClipId)
-	const selectedAudioId = useStore((s) => s.selectedAudioId)
 	const selectedId = useStore((s) => s.selectedId)
 	const scroller = useRef<HTMLDivElement>(null)
+	const inner = useRef<HTMLDivElement>(null)
+	const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
 	const [viewW, setViewW] = useState(0)
 
 	// the ruler and tracks always fill the panel, however wide it is
@@ -105,6 +195,47 @@ export function Timeline(): React.JSX.Element {
 
 	const st = useStore.getState
 	const targetFixture = selectedId ?? fixtures[0]?.id
+	const selected = new Set(selection)
+	const hasSelection = selection.length > 0
+	const hasClipSelected = clips.some((c) => selected.has(c.id))
+
+	/** Press on empty timeline space: a plain click clears the selection; a drag draws a box and selects whatever it touches. */
+	const startMarquee = (e: React.PointerEvent, onClick: () => void): void => {
+		if (e.button !== 0) return
+		const box = inner.current
+		if (!box) return
+		e.preventDefault()
+		const x0 = e.clientX
+		const y0 = e.clientY
+		const additive = e.shiftKey || e.ctrlKey || e.metaKey
+		const prior = additive ? st().selection.slice() : []
+		let dragging = false
+		const move = (ev: PointerEvent): void => {
+			if (!dragging && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return
+			dragging = true
+			const left = Math.min(x0, ev.clientX)
+			const right = Math.max(x0, ev.clientX)
+			const top = Math.min(y0, ev.clientY)
+			const bottom = Math.max(y0, ev.clientY)
+			const origin = box.getBoundingClientRect()
+			setMarquee({ x: left - origin.left, y: top - origin.top, w: right - left, h: bottom - top })
+			const hits = Array.from(box.querySelectorAll<HTMLElement>("[data-item-id]"))
+				.filter((el) => {
+					const r = el.getBoundingClientRect()
+					return r.left < right && r.right > left && r.top < bottom && r.bottom > top
+				})
+				.map((el) => el.dataset.itemId as string)
+			st().setSelection([...new Set([...prior, ...hits])])
+		}
+		const up = (): void => {
+			window.removeEventListener("pointermove", move)
+			window.removeEventListener("pointerup", up)
+			setMarquee(null)
+			if (!dragging && !additive) onClick()
+		}
+		window.addEventListener("pointermove", move)
+		window.addEventListener("pointerup", up)
+	}
 
 	const timeAt = (clientX: number): number => {
 		const el = scroller.current
@@ -174,6 +305,13 @@ export function Timeline(): React.JSX.Element {
 				</button>
 				<button
 					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line"
+					onClick={() => st().addAccent(lightTime(st()))}
+					title="Brighten the lights at the playhead for a moment (A). Tap A while the song plays to hit the beats live."
+				>
+					+ Accent
+				</button>
+				<button
+					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line"
 					onClick={() => void addAudio()}
 					title="Add an MP3/WAV (or just drag one onto the timeline)"
 				>
@@ -181,23 +319,47 @@ export function Timeline(): React.JSX.Element {
 				</button>
 				<button
 					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
-					disabled={!selectedClipId}
-					onClick={() => selectedClipId && st().splitClip(selectedClipId, st().playhead)}
-					title="Split the selected clip at the playhead (S)"
+					disabled={!hasClipSelected}
+					onClick={() => st().splitSelection(st().playhead)}
+					title="Split the selected clips at the playhead (S)"
 				>
 					Split
 				</button>
+				<span className="flex gap-1">
+					<button
+						className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+						disabled={!hasSelection}
+						onClick={() => st().copySelection()}
+						title="Copy everything selected (Ctrl+C)"
+					>
+						Copy
+					</button>
+					<button
+						className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+						disabled={!hasClipboard}
+						onClick={() => st().pasteClipboard()}
+						title="Paste at the playhead, keeping the spacing. Clips go on the selected light's track (Ctrl+V)"
+					>
+						Paste
+					</button>
+					<button
+						className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+						disabled={!hasSelection}
+						onClick={() => st().duplicateSelection()}
+						title="Copy the selection right after the original (Ctrl+D)"
+					>
+						Duplicate
+					</button>
+				</span>
 				<button
 					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
-					disabled={!selectedClipId && !selectedAudioId}
-					onClick={() => {
-						if (selectedClipId) st().removeClip(selectedClipId)
-						else if (selectedAudioId) st().removeAudioClip(selectedAudioId)
-					}}
-					title="Delete the selected clip (Del)"
+					disabled={!hasSelection}
+					onClick={() => st().deleteSelection()}
+					title="Delete everything selected (Del)"
 				>
 					Delete
 				</button>
+				{selection.length > 1 && <span className="text-accent">{selection.length} selected</span>}
 				<label className="flex items-center gap-1 text-muted">
 					<input type="checkbox" checked={snapOn} onChange={(e) => st().setSnap(e.target.checked)} />
 					Snap
@@ -231,7 +393,7 @@ export function Timeline(): React.JSX.Element {
 			</div>
 
 			<div ref={scroller} className="relative min-h-0 min-w-0 flex-1 overflow-auto">
-				<div className="relative" style={{ width: LABEL_W + contentW, minHeight: "100%" }}>
+				<div ref={inner} className="relative" style={{ width: LABEL_W + contentW, minHeight: "100%" }}>
 					{/* ruler */}
 					<div className="sticky top-0 z-40 flex bg-panel" style={{ height: RULER_H }}>
 						<div
@@ -276,7 +438,7 @@ export function Timeline(): React.JSX.Element {
 								width: contentW,
 								backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px ${zoom}px)`,
 							}}
-							onPointerDown={() => st().selectAudio(null)}
+							onPointerDown={(e) => startMarquee(e, () => st().setSelection([]))}
 						>
 							{audioClips.length === 0 && (
 								<span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted">
@@ -284,7 +446,7 @@ export function Timeline(): React.JSX.Element {
 								</span>
 							)}
 							{audioClips.map((a) => (
-								<AudioClipView key={a.id} clip={a} zoom={zoom} selected={a.id === selectedAudioId} />
+								<AudioClipView key={a.id} clip={a} zoom={zoom} selected={selected.has(a.id)} />
 							))}
 						</div>
 					</div>
@@ -310,6 +472,37 @@ export function Timeline(): React.JSX.Element {
 						</div>
 					)}
 
+					{/* accent track: brightness bumps that sit on top of the light clips */}
+					<div className="flex" style={{ height: ACCENT_H }}>
+						<div
+							className="sticky left-0 z-30 flex items-center border-b border-r border-line bg-panel px-2 text-[#ffb02e]"
+							style={{ width: LABEL_W, minWidth: LABEL_W }}
+						>
+							✦ Accents
+						</div>
+						<div
+							className="relative border-b border-line"
+							style={{
+								width: contentW,
+								backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px ${zoom}px)`,
+							}}
+							onPointerDown={(e) => startMarquee(e, () => st().setSelection([]))}
+							onDoubleClick={(e) => {
+								const left = e.currentTarget.getBoundingClientRect().left
+								st().addAccent((e.clientX - left) / zoom)
+							}}
+						>
+							{accents.length === 0 && (
+								<span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted">
+									Double-click here, or press A, to add a brightness boost
+								</span>
+							)}
+							{accents.map((a) => (
+								<AccentView key={a.id} accent={a} zoom={zoom} selected={selected.has(a.id)} />
+							))}
+						</div>
+					</div>
+
 					{/* light tracks */}
 					{fixtures.length === 0 && (
 						<div className="sticky left-0 p-4 text-muted">Add a light in the Fixtures tab to get a track.</div>
@@ -329,10 +522,12 @@ export function Timeline(): React.JSX.Element {
 									width: contentW,
 									backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px ${zoom}px)`,
 								}}
-								onPointerDown={() => {
-									st().selectFixture(f.id)
-									st().selectClip(null)
-								}}
+								onPointerDown={(e) =>
+									startMarquee(e, () => {
+										st().selectFixture(f.id)
+										st().setSelection([])
+									})
+								}
 								onDoubleClick={(e) => {
 									const left = e.currentTarget.getBoundingClientRect().left
 									st().addClip(f.id, (e.clientX - left) / zoom)
@@ -341,7 +536,13 @@ export function Timeline(): React.JSX.Element {
 								{clips
 									.filter((c) => c.fixtureId === f.id)
 									.map((c) => (
-										<ClipView key={c.id} clip={c} zoom={zoom} selected={c.id === selectedClipId} />
+										<ClipView
+											key={c.id}
+											clip={c}
+											zoom={zoom}
+											selected={selected.has(c.id)}
+											handles={c.id === selectedClipId}
+										/>
 									))}
 							</div>
 						</div>
@@ -357,9 +558,70 @@ export function Timeline(): React.JSX.Element {
 						className="pointer-events-none absolute top-0 bottom-0 z-20 w-px bg-red-500"
 						style={{ left: LABEL_W + playhead * zoom }}
 					/>
+					{marquee && (
+						<div
+							className="pointer-events-none absolute z-30 border border-accent bg-accent/10"
+							style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+						/>
+					)}
 				</div>
 			</div>
 		</section>
+	)
+}
+
+/** An accent point: drag to move, drag the edges to change how long it lasts. */
+function AccentView({ accent, zoom, selected }: { accent: Accent; zoom: number; selected: boolean }): React.JSX.Element {
+	const st = useStore.getState
+	const h = ACCENT_H - 8
+	const w = Math.max(10, accent.duration * zoom)
+	const fiW = Math.min(w, accent.fadeIn * zoom)
+	const foW = Math.min(w, accent.fadeOut * zoom)
+
+	const move = (e: React.PointerEvent): void => itemPointerDown(e, accent.id)
+	const trimL = (e: React.PointerEvent): void => {
+		st().selectAccent(accent.id)
+		const s0 = accent.start
+		const end = accent.start + accent.duration
+		startDrag(e, (dx) => {
+			const ns = Math.max(0, Math.min(snapTime(s0 + dx / zoom, accent.id), end - 0.1))
+			st().updateAccent(accent.id, { start: ns, duration: end - ns })
+		})
+	}
+	const trimR = (e: React.PointerEvent): void => {
+		st().selectAccent(accent.id)
+		const e0 = accent.start + accent.duration
+		startDrag(e, (dx) => {
+			st().updateAccent(accent.id, { duration: snapTime(e0 + dx / zoom, accent.id) - accent.start })
+		})
+	}
+
+	return (
+		<div
+			className="absolute top-1 z-[1] cursor-grab overflow-hidden rounded active:cursor-grabbing"
+			style={{
+				left: accent.start * zoom,
+				width: w,
+				height: h,
+				background: `rgba(${ACCENT_COLOR},${0.4 + 0.6 * accent.amount})`,
+				outline: selected ? "2px solid #fff" : "1px solid rgba(0,0,0,0.45)",
+				outlineOffset: -1,
+			}}
+			title={`+${Math.round(accent.amount * 100)}% brightness`}
+			data-item-id={accent.id}
+			onPointerDown={move}
+			onDoubleClick={(e) => e.stopPropagation()}
+		>
+			<svg width={w} height={h} className="pointer-events-none absolute inset-0">
+				{fiW > 0 && <polygon points={`0,0 ${fiW},0 0,${h}`} fill="rgba(0,0,0,0.5)" />}
+				{foW > 0 && <polygon points={`${w},0 ${w - foW},0 ${w},${h}`} fill="rgba(0,0,0,0.5)" />}
+			</svg>
+			<span className="pointer-events-none absolute top-1/2 left-1.5 -translate-y-1/2 text-[10px] font-bold text-black">
+				+{Math.round(accent.amount * 100)}%
+			</span>
+			<div className="absolute inset-y-0 left-0 w-1.5 cursor-col-resize" onPointerDown={trimL} />
+			<div className="absolute inset-y-0 right-0 w-1.5 cursor-col-resize" onPointerDown={trimR} />
+		</div>
 	)
 }
 
@@ -426,21 +688,11 @@ function WaveTile({ path, zoom, x0, width }: { path: string; zoom: number; x0: n
 }
 
 function AudioClipView({ clip, zoom, selected }: { clip: AudioClip; zoom: number; selected: boolean }): React.JSX.Element {
-	const st = useStore.getState
 	const status = useStore((s) => s.audioStatus[clip.path])
 	const w = clip.duration * zoom
 	const tiles = Math.ceil(w / TILE_W)
 
-	const move = (e: React.PointerEvent): void => {
-		st().selectAudio(clip.id)
-		const s0 = clip.start
-		startDrag(e, (dx) => {
-			const raw = s0 + dx / zoom
-			const a = snapTime(raw, clip.id)
-			const b = snapTime(raw + clip.duration, clip.id) - clip.duration
-			st().moveAudioClip(clip.id, Math.abs(a - raw) <= Math.abs(b - raw) ? a : b)
-		})
-	}
+	const move = (e: React.PointerEvent): void => itemPointerDown(e, clip.id)
 
 	return (
 		<div
@@ -452,6 +704,7 @@ function AudioClipView({ clip, zoom, selected }: { clip: AudioClip; zoom: number
 				outline: selected ? "2px solid #fff" : "1px solid rgba(77,163,255,0.5)",
 				outlineOffset: -1,
 			}}
+			data-item-id={clip.id}
 			onPointerDown={move}
 		>
 			{status === "ready" &&
@@ -471,22 +724,23 @@ function AudioClipView({ clip, zoom, selected }: { clip: AudioClip; zoom: number
 	)
 }
 
-function ClipView({ clip, zoom, selected }: { clip: Clip; zoom: number; selected: boolean }): React.JSX.Element {
+function ClipView({
+	clip,
+	zoom,
+	selected,
+	handles,
+}: {
+	clip: Clip
+	zoom: number
+	selected: boolean
+	handles: boolean
+}): React.JSX.Element {
 	const st = useStore.getState
 	const w = clip.duration * zoom
 	const fiW = clip.fadeIn * zoom
 	const foW = clip.fadeOut * zoom
 
-	const move = (e: React.PointerEvent): void => {
-		st().selectClip(clip.id)
-		const s0 = clip.start
-		startDrag(e, (dx) => {
-			const raw = s0 + dx / zoom
-			const a = snapTime(raw, clip.id)
-			const b = snapTime(raw + clip.duration, clip.id) - clip.duration
-			st().moveClip(clip.id, Math.abs(a - raw) <= Math.abs(b - raw) ? a : b)
-		})
-	}
+	const move = (e: React.PointerEvent): void => itemPointerDown(e, clip.id)
 	const trimL = (e: React.PointerEvent): void => {
 		st().selectClip(clip.id)
 		const s0 = clip.start
@@ -517,6 +771,7 @@ function ClipView({ clip, zoom, selected }: { clip: Clip; zoom: number; selected
 				outline: selected ? "2px solid #fff" : "1px solid rgba(0,0,0,0.45)",
 				outlineOffset: -1,
 			}}
+			data-item-id={clip.id}
 			onPointerDown={move}
 			onDoubleClick={(e) => e.stopPropagation()}
 		>
@@ -529,7 +784,7 @@ function ClipView({ clip, zoom, selected }: { clip: Clip; zoom: number; selected
 			</span>
 			<div className="absolute inset-y-0 left-0 w-1.5 cursor-col-resize" onPointerDown={trimL} />
 			<div className="absolute inset-y-0 right-0 w-1.5 cursor-col-resize" onPointerDown={trimR} />
-			{selected && (
+			{handles && (
 				<>
 					<div
 						className="absolute top-1 h-2.5 w-2.5 cursor-ew-resize rounded-full border border-black bg-white"

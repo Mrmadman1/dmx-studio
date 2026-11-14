@@ -44,7 +44,125 @@ function Slider(props: {
 	)
 }
 
+/** Settings for the selected accent point. */
+function AccentPanel({ id }: { id: string }): React.JSX.Element | null {
+	const accent = useStore((s) => s.accents.find((a) => a.id === id))
+	const fixtures = useStore((s) => s.fixtures)
+	const update = useStore((s) => s.updateAccent)
+	const remove = useStore((s) => s.removeAccent)
+	if (!accent) return null
+
+	const hitsAll = accent.fixtureIds === null
+	const toggle = (fid: string): void => {
+		const current = accent.fixtureIds ?? fixtures.map((f) => f.id)
+		const next = current.includes(fid) ? current.filter((x) => x !== fid) : [...current, fid]
+		if (next.length === 0) return // an accent has to hit at least one light
+		update(id, { fixtureIds: next.length === fixtures.length ? null : next })
+	}
+
+	return (
+		<section className="space-y-3 rounded border border-[#ffb02e]/50 bg-panel2 p-2">
+			<h4 className="text-xs uppercase tracking-wider text-[#ffb02e]">Accent point</h4>
+			<Slider
+				label="Brightness boost"
+				value={Math.round(accent.amount * 100)}
+				min={0}
+				max={100}
+				unit="%"
+				onChange={(v) => update(id, { amount: v / 100 })}
+			/>
+			<Slider
+				label="Lasts"
+				value={accent.duration}
+				min={0.1}
+				max={8}
+				step={0.05}
+				unit="s"
+				onChange={(v) => update(id, { duration: v })}
+			/>
+			<Slider
+				label="Fade in"
+				value={accent.fadeIn}
+				min={0}
+				max={Math.max(0, accent.duration - accent.fadeOut)}
+				step={0.01}
+				unit="s"
+				onChange={(v) => update(id, { fadeIn: v })}
+			/>
+			<Slider
+				label="Fade out"
+				value={accent.fadeOut}
+				min={0}
+				max={Math.max(0, accent.duration - accent.fadeIn)}
+				step={0.01}
+				unit="s"
+				onChange={(v) => update(id, { fadeOut: v })}
+			/>
+			<label className="flex items-center justify-between">
+				<span>Fade curve</span>
+				<select
+					className="rounded border border-line bg-panel px-2 py-1"
+					value={accent.curve}
+					onChange={(e) => update(id, { curve: e.target.value as Curve })}
+				>
+					<option value="smooth">Smooth</option>
+					<option value="linear">Linear</option>
+				</select>
+			</label>
+			<div className="space-y-1">
+				<label className="flex items-center justify-between">
+					<span>Hits all lights</span>
+					<input
+						type="checkbox"
+						checked={hitsAll}
+						disabled={fixtures.length === 0}
+						onChange={(e) => update(id, { fixtureIds: e.target.checked ? null : fixtures.map((f) => f.id) })}
+					/>
+				</label>
+				{!hitsAll &&
+					fixtures.map((f) => (
+						<label key={f.id} className="flex items-center justify-between pl-3 text-muted">
+							<span className="truncate">{f.name}</span>
+							<input
+								type="checkbox"
+								checked={accent.fixtureIds?.includes(f.id) ?? false}
+								onChange={() => toggle(f.id)}
+							/>
+						</label>
+					))}
+			</div>
+			<p className="text-muted">Brightens lights that have clips on the timeline. It adds to the clip's brightness, up to full.</p>
+			<div className="flex items-center justify-between text-muted">
+				<span>Starts {accent.start.toFixed(2)}s</span>
+				<button className="rounded border border-line px-2 py-1 hover:text-red-400" onClick={() => remove(id)}>
+					Delete
+				</button>
+			</div>
+		</section>
+	)
+}
+
+/** Shown when several timeline items are selected at once. */
+function MultiPanel({ count }: { count: number }): React.JSX.Element {
+	const deleteSelection = useStore((s) => s.deleteSelection)
+	return (
+		<section className="space-y-2 rounded border border-accent/50 bg-panel2 p-2">
+			<h4 className="text-xs uppercase tracking-wider text-accent">{count} items selected</h4>
+			<p className="text-muted">
+				Drag any of them to move the whole group. Hold Alt while dragging to drop copies instead. Copy, Cut, Paste,
+				Duplicate and Delete all work on the group, and a paste keeps the spacing.
+			</p>
+			<p className="text-muted">Click one item on its own to edit it.</p>
+			<button className="rounded border border-line px-2 py-1 hover:text-red-400" onClick={deleteSelection}>
+				Delete all {count}
+			</button>
+		</section>
+	)
+}
+
 export function Inspector(): React.JSX.Element {
+	const selectionCount = useStore((s) => s.selection.length)
+	const selectedAccentId = useStore((s) => s.selectedAccentId)
 	const fixture = useStore((s) => s.fixtures.find((f) => f.id === s.selectedId))
 	const clip = useStore((s) => s.clips.find((c) => c.id === s.selectedClipId))
 	const driven = useStore((s) => s.mode === "timeline" && s.clips.some((c) => c.fixtureId === s.selectedId))
@@ -57,9 +175,15 @@ export function Inspector(): React.JSX.Element {
 
 	if (!fixture) {
 		return (
-			<aside className="bg-panel p-3">
-				<h3 className="mb-2 text-xs uppercase tracking-wider text-muted">Inspector</h3>
-				<p className="text-muted">Select a light or a clip to adjust it.</p>
+			<aside className="min-h-0 space-y-4 overflow-y-auto bg-panel p-3">
+				<h3 className="text-xs uppercase tracking-wider text-muted">Inspector</h3>
+				{selectionCount > 1 ? (
+					<MultiPanel count={selectionCount} />
+				) : selectedAccentId ? (
+					<AccentPanel id={selectedAccentId} />
+				) : (
+					<p className="text-muted">Select a light, a clip or an accent to adjust it.</p>
+				)}
 			</aside>
 		)
 	}
@@ -76,6 +200,9 @@ export function Inspector(): React.JSX.Element {
 	return (
 		<aside className="min-h-0 space-y-4 overflow-y-auto bg-panel p-3">
 			<h3 className="text-xs uppercase tracking-wider text-muted">Inspector</h3>
+
+			{selectionCount > 1 && <MultiPanel count={selectionCount} />}
+			{selectedAccentId && <AccentPanel id={selectedAccentId} />}
 
 			{clip && (
 				<section className="space-y-3 rounded border border-accent/50 bg-panel2 p-2">
