@@ -20,6 +20,21 @@ contextBridge.exposeInMainWorld("studio", {
 	openText: () => ipcRenderer.invoke("dialog:openText"),
 	saveText: (defaultName, text) => ipcRenderer.invoke("dialog:saveText", defaultName, text),
 	mediaUrl: (path) => ipcRenderer.invoke("media:url", path),
+	projectionDisplays: () => ipcRenderer.invoke("projection:displays"),
+	projectionOpen: (displayId) => ipcRenderer.invoke("projection:open", displayId),
+	projectionClose: () => ipcRenderer.invoke("projection:close"),
+	projectionSend: (json) => ipcRenderer.send("projection:state", json),
+	projectionGet: () => ipcRenderer.invoke("projection:get"),
+	onProjectionState: (cb) => {
+		const handler = (_e, json) => cb(json)
+		ipcRenderer.on("projection:state", handler)
+		return () => ipcRenderer.removeListener("projection:state", handler)
+	},
+	onProjectionStatus: (cb) => {
+		const handler = (_e, open) => cb(open)
+		ipcRenderer.on("projection:status", handler)
+		return () => ipcRenderer.removeListener("projection:status", handler)
+	},
 	demoStageUrl: () => ipcRenderer.invoke("stage:demoUrl"),
 	loadAutosave: () => ipcRenderer.invoke("project:loadAutosave"),
 	autosave: (json) => ipcRenderer.send("project:autosave", json),

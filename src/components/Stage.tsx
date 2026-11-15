@@ -40,6 +40,8 @@ export function Stage(): React.JSX.Element {
 	const view = useStore((s) => s.stageView)
 	const setView = useStore((s) => s.setStageView)
 	const hasLights = useStore((s) => s.fixtures.length > 0)
+	const addFixture = useStore((s) => s.addFixture)
+	const setHelpOpen = useStore((s) => s.setHelpOpen)
 	const stage = useStore((s) => s.stage)
 	const stageStatus = useStore((s) => s.stageStatus)
 	const stageError = useStore((s) => s.stageError)
@@ -77,6 +79,23 @@ export function Stage(): React.JSX.Element {
 						<Stage3D tool={tool} snap={snap} frameTick={frameTick} ambient={ambient} />
 					</Suspense>
 				</GlBoundary>
+			)}
+
+			{!hasLights && (
+				<div className="absolute inset-0 z-[5] flex items-center justify-center p-4">
+					<div className="max-w-sm rounded-lg border border-line bg-panel/95 p-5 text-center shadow-xl">
+						<div className="mb-1 text-base font-semibold text-white">Let's light something up</div>
+						<p className="mb-3 text-muted">This picture shows what your lights are doing. You don't have any lights yet.</p>
+						<div className="flex flex-col gap-2">
+							<button className="rounded bg-accent px-3 py-2 font-medium text-black hover:opacity-90" onClick={() => addFixture("par7")}>
+								Add my first light
+							</button>
+							<button className="rounded border border-line bg-panel2 px-3 py-2 hover:bg-line" onClick={() => setHelpOpen(true)}>
+								How does this work?
+							</button>
+						</div>
+					</div>
+				</div>
 			)}
 
 			<div className="absolute top-2 left-2 z-10 flex flex-wrap items-center gap-1">

@@ -1,7 +1,7 @@
 const os = require("node:os")
 const path = require("node:path")
 const fs = require("node:fs/promises")
-const { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } = require("electron")
+const { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, screen } = require("electron")
 const { DmxEngine } = require("./dmx.cjs")
 const { createMediaServer } = require("./media-server.cjs")
 
@@ -21,6 +21,8 @@ app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion")
 
 let win = null
 let dmx = null // created once the app is ready (it forks a utility process)
+let output = null // the borderless projector window
+let projectionState = null // the latest projection setup (JSON), handed to the output window when it opens
 
 function createWindow() {
 	win = new BrowserWindow({
@@ -44,6 +46,75 @@ function createWindow() {
 		void win.loadURL("http://localhost:5173")
 	}
 }
+
+// --- projection output ---------------------------------------------------------------
+// The editor lives in the main window; the projector gets its own borderless fullscreen window that
+// renders the same setup. The main window sends the setup here on every change and we pass it along.
+function sendOutputStatus() {
+	if (win && !win.isDestroyed()) win.webContents.send("projection:status", !!output && !output.isDestroyed())
+}
+
+function closeOutput() {
+	if (output && !output.isDestroyed()) output.close()
+}
+
+ipcMain.handle("projection:displays", () =>
+	screen.getAllDisplays().map((d, i) => ({
+		id: d.id,
+		label: `${d.label || `Display ${i + 1}`}${d.id === screen.getPrimaryDisplay().id ? " (main)" : ""}`,
+		width: d.size.width,
+		height: d.size.height,
+	})),
+)
+ipcMain.handle("projection:open", (_e, displayId) => {
+	const d = screen.getAllDisplays().find((x) => x.id === displayId)
+	if (!d) return false
+	closeOutput()
+	output = new BrowserWindow({
+		x: d.bounds.x,
+		y: d.bounds.y,
+		width: d.bounds.width,
+		height: d.bounds.height,
+		frame: false,
+		fullscreen: true,
+		backgroundColor: "#000000",
+		title: "DMX Studio output",
+		autoHideMenuBar: true,
+		webPreferences: {
+			preload: path.join(__dirname, "preload.cjs"),
+			contextIsolation: true,
+			nodeIntegration: false,
+			backgroundThrottling: false,
+			autoplayPolicy: "no-user-gesture-required",
+		},
+	})
+	const w = output
+	// Esc closes the output (there's no title bar to close it with)
+	w.webContents.on("before-input-event", (e, input) => {
+		if (input.type === "keyDown" && input.key === "Escape") {
+			e.preventDefault()
+			w.close()
+		}
+	})
+	w.on("closed", () => {
+		if (output === w) output = null
+		sendOutputStatus()
+	})
+	if (app.isPackaged || process.env.DMX_STUDIO_PROD) {
+		void w.loadFile(path.join(__dirname, "..", "dist", "index.html"), { hash: "output" })
+	} else {
+		void w.loadURL("http://localhost:5173/#output")
+	}
+	w.webContents.once("did-finish-load", sendOutputStatus)
+	return true
+})
+ipcMain.handle("projection:close", () => closeOutput())
+ipcMain.handle("projection:get", () => projectionState)
+ipcMain.on("projection:state", (_e, json) => {
+	if (typeof json !== "string" || json.length > 4 * 1024 * 1024) return
+	projectionState = json
+	if (output && !output.isDestroyed()) output.webContents.send("projection:state", json)
+})
 
 ipcMain.handle("dmx:list", () => dmx.list())
 ipcMain.handle("dmx:connect", async (_e, p) => {
@@ -148,6 +219,7 @@ app.whenReady().then(async () => {
 	createWindow()
 })
 app.on("window-all-closed", async () => {
+	closeOutput()
 	try {
 		await dmx?.disconnect()
 	} catch {

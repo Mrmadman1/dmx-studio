@@ -75,12 +75,6 @@ export function StagePreview(): React.JSX.Element {
 				ctx.fillText(f.name, cx, cy + 62 * k)
 				ctx.fillText(`addr ${f.address}`, cx, cy + 62 * k + Math.max(12, 16 * k))
 			})
-			if (fixtures.length === 0) {
-				ctx.fillStyle = "#55555e"
-				ctx.font = "14px system-ui"
-				ctx.textAlign = "center"
-				ctx.fillText("Add a light from the Fixtures tab", w / 2, h / 2)
-			}
 			raf = requestAnimationFrame(draw)
 		}
 		raf = requestAnimationFrame(draw)

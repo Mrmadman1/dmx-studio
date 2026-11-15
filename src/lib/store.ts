@@ -1,6 +1,7 @@
 import { create } from "zustand"
 
 import { BUILTIN_EFFECTS, type EffectDef, ENGINES, audioBeatTimes, carveClips, generateEffect, normalizeEffect } from "./effects"
+import { type Projection, type ProjLayer, cleanProjection, emptyProjection } from "./projection"
 import { type PoseFrame, cleanMotion, currentPose, motionOf, poseAt, validFrames } from "./motion"
 import { type MotionSpec, profileById } from "./profiles"
 import { type Accent, type Clip, MIN_CLIP, clipColor, effectiveValues, showEnd } from "./show"
@@ -161,6 +162,7 @@ export interface ProjectData {
 	frames: PoseFrame[]
 	customEffects: EffectDef[]
 	effectRuns: EffectRun[]
+	projection?: Projection
 }
 
 type Looks = Record<string, number[]>
@@ -207,6 +209,17 @@ interface State {
 	/** every effect added to the timeline, so each can be removed again */
 	effectRuns: EffectRun[]
 
+	/** projection mapping: the sources, layers, masks and corner pins (saved with the show) */
+	projection: Projection
+	selectedLayerId: string | null
+	/** which workspace is showing: the lights, or the projection mapper (runtime only) */
+	workspace: "show" | "projection"
+	/** whether the Help guide is open (runtime only) */
+	helpOpen: boolean
+	/** how many undo / redo steps are available (the history itself lives outside the state) */
+	undoDepth: number
+	redoDepth: number
+
 	clips: Clip[]
 	selectedClipId: string | null
 	/** seconds */
@@ -215,6 +228,15 @@ interface State {
 	/** timeline pixels per second */
 	zoom: number
 	snap: boolean
+
+	undo: () => void
+	redo: () => void
+
+	/** change the projection setup: one undo step per gesture, like any other edit */
+	editProjection: (fn: (p: Projection) => Projection) => void
+	selectLayer: (id: string | null) => void
+	setWorkspace: (w: "show" | "projection") => void
+	setHelpOpen: (open: boolean) => void
 
 	addFixture: (profileId: string) => void
 	removeFixture: (id: string) => void
@@ -534,10 +556,59 @@ function placeGroup(
 	return { clips: placedClips, accents, audio, frames, end: Math.max(...placed.map((x) => x.start + (x.duration ?? 0))) }
 }
 
+/** The parts of the show that undo rewinds. Everything else (playhead, zoom, selection, mode) is not history. */
+const TRACKED = ["fixtures", "clips", "cues", "audioClips", "accents", "frames", "customEffects", "effectRuns", "reference", "projection"] as const
+type Snap = Pick<State, (typeof TRACKED)[number]>
+const HISTORY_LIMIT = 100
+/** changes to the same things closer together than this are one step (a drag, a slider) */
+const COALESCE_MS = 500
+
+function takeSnap(s: State): Snap {
+	return { fixtures: s.fixtures, clips: s.clips, cues: s.cues, audioClips: s.audioClips, accents: s.accents, frames: s.frames, customEffects: s.customEffects, effectRuns: s.effectRuns, reference: s.reference, projection: s.projection }
+}
+
 export const useStore = create<State>((rawSet, get) => {
-	/** every update goes through here, so the single-selection ids and the selection list never disagree */
-	const set = (partial: Partial<State> | ((s: State) => Partial<State>)): void =>
+	let past: Snap[] = []
+	let future: Snap[] = []
+	let lastChange = 0
+	let lastKeys = ""
+	/** an update that is not the user's edit (playback, loading, undo itself): never recorded */
+	const quiet = (partial: Partial<State> | ((s: State) => Partial<State>)): void =>
 		rawSet((s) => syncSelection(s, typeof partial === "function" ? partial(s) : partial))
+	/** every update goes through here, so the single-selection ids and the selection list never disagree, and edits are recorded for undo */
+	const set = (partial: Partial<State> | ((s: State) => Partial<State>)): void =>
+		rawSet((s) => {
+			const patch = syncSelection(s, typeof partial === "function" ? partial(s) : partial)
+			const changed = TRACKED.filter((k) => k in patch && patch[k] !== s[k])
+			if (!changed.length) return patch
+			const now = performance.now()
+			const keys = changed.join()
+			const continuing = past.length > 0 && keys === lastKeys && now - lastChange < COALESCE_MS
+			lastChange = now
+			lastKeys = keys
+			if (continuing) return patch
+			past.push(takeSnap(s))
+			if (past.length > HISTORY_LIMIT) past.shift()
+			future = []
+			return { ...patch, undoDepth: past.length, redoDepth: 0 }
+		})
+	/** put a snapshot back, dropping any selection that points at things that no longer exist */
+	const restore = (snap: Snap): void =>
+		quiet((s) => {
+			const ids = new Set<string>([...snap.clips, ...snap.accents, ...snap.audioClips, ...snap.frames].map((x) => x.id))
+			const selection = s.selection.filter((id) => ids.has(id))
+			return {
+				...snap,
+				selection,
+				fading: null,
+				selectedId: s.selectedId && snap.fixtures.some((f) => f.id === s.selectedId) ? s.selectedId : null,
+				selectedLayerId: s.selectedLayerId && snap.projection.layers.some((l: ProjLayer) => l.id === s.selectedLayerId) ? s.selectedLayerId : null,
+				selectedCueId: s.selectedCueId && snap.cues.some((c) => c.id === s.selectedCueId) ? s.selectedCueId : null,
+				currentCue: Math.min(s.currentCue, snap.cues.length - 1),
+				undoDepth: past.length,
+				redoDepth: future.length,
+			}
+		})
 	return {
 	fixtures: [],
 	selectedId: null,
@@ -566,12 +637,41 @@ export const useStore = create<State>((rawSet, get) => {
 	selectedFrameId: null,
 	customEffects: [],
 	effectRuns: [],
+	projection: emptyProjection(),
+	selectedLayerId: null,
+	workspace: "show",
+	helpOpen: false,
+	undoDepth: 0,
+	redoDepth: 0,
 	clips: [],
 	selectedClipId: null,
 	playhead: 0,
 	playing: false,
 	zoom: 60,
 	snap: true,
+
+	undo: () => {
+		const prev = past.pop()
+		if (!prev) return
+		future.push(takeSnap(get()))
+		lastChange = 0
+		restore(prev)
+	},
+	redo: () => {
+		const next = future.pop()
+		if (!next) return
+		past.push(takeSnap(get()))
+		lastChange = 0
+		restore(next)
+	},
+
+	editProjection: (fn) => set((s) => {
+		const next = fn(s.projection)
+		return next === s.projection ? {} : { projection: next }
+	}),
+	selectLayer: (selectedLayerId) => set({ selectedLayerId }),
+	setWorkspace: (workspace) => set({ workspace }),
+	setHelpOpen: (helpOpen) => set({ helpOpen }),
 
 	addFixture: (profileId) =>
 		set((s) => {
@@ -793,7 +893,7 @@ export const useStore = create<State>((rawSet, get) => {
 		}),
 	selectCue: (selectedCueId) => set({ selectedCueId }),
 	goCue: (index) =>
-		set((s) => {
+		quiet((s) => {
 			const cue = s.cues[index]
 			if (!cue) return {}
 			if (cue.fade <= 0) {
@@ -819,7 +919,7 @@ export const useStore = create<State>((rawSet, get) => {
 		if (s.currentCue > 0) s.goCue(s.currentCue - 1)
 	},
 	tickFade: (now) =>
-		set((s) => {
+		quiet((s) => {
 			const fd = s.fading
 			if (!fd) return {}
 			const p = Math.min(1, (now - fd.start) / fd.duration)
@@ -1199,7 +1299,13 @@ export const useStore = create<State>((rawSet, get) => {
 		const fixtures = Array.isArray(p.fixtures)
 			? p.fixtures.map((f) => ({ ...f, pos: cleanVec3(f.pos), rot: cleanVec3(f.rot), motion: cleanMotion(f.motion) }))
 			: []
-		set({
+		past = []
+		future = []
+		quiet({
+			projection: cleanProjection(p.projection),
+			selectedLayerId: null,
+			undoDepth: 0,
+			redoDepth: 0,
 			fixtures,
 			frames: validFrames(p.frames).filter((fr) => fixtures.some((f) => f.id === fr.fixtureId)),
 			selectedFrameId: null,

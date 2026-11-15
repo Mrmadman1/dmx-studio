@@ -469,6 +469,7 @@ export function Inspector(): React.JSX.Element {
 					onChange={(e) => setAddress(fixture.id, Number(e.target.value))}
 				/>
 			</label>
+			<p className="text-muted">Set the real light to this same number, or it won't listen.</p>
 
 			{motionOf(fixture) && <MotionPanel id={fixture.id} />}
 			{drivenMotion && (

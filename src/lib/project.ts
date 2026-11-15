@@ -25,6 +25,7 @@ export function toProject(): ProjectData {
 		frames: s.frames,
 		customEffects: s.customEffects,
 		effectRuns: s.effectRuns,
+		projection: s.projection,
 	}
 }
 
@@ -91,7 +92,8 @@ export function usePersistence(): void {
 					s.stage !== prev.stage ||
 					s.frames !== prev.frames ||
 					s.customEffects !== prev.customEffects ||
-					s.effectRuns !== prev.effectRuns
+					s.effectRuns !== prev.effectRuns ||
+						s.projection !== prev.projection
 				if (!changed) return
 				clearTimeout(timer)
 				timer = setTimeout(flush, 800)

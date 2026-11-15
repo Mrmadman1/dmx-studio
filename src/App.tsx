@@ -2,7 +2,9 @@ import { useEffect } from "react"
 
 import { AssetDrawer } from "./components/AssetDrawer"
 import { CuePanel } from "./components/CuePanel"
+import { HelpGuide, welcomeSeen } from "./components/HelpGuide"
 import { Inspector } from "./components/Inspector"
+import { ProjectionView } from "./components/ProjectionView"
 import { ReferencePanel } from "./components/ReferencePanel"
 import { Stage } from "./components/Stage"
 import { Timeline } from "./components/Timeline"
@@ -79,6 +81,17 @@ function useTransport(): void {
 	}, [playing])
 }
 
+/** Keep the projector window up to date: it renders from the same setup the editor is showing. */
+function useProjectionSync(): void {
+	useEffect(() => {
+		const push = (): void => window.studio?.projectionSend(JSON.stringify(useStore.getState().projection))
+		push()
+		return useStore.subscribe((s, prev) => {
+			if (s.projection !== prev.projection) push()
+		})
+	}, [])
+}
+
 /** Run a cue's fade while one is in progress. */
 function useCueFade(): void {
 	const fading = useStore((s) => s.fading !== null)
@@ -102,8 +115,15 @@ function useShortcuts(): void {
 			const s = useStore.getState()
 			if (e.ctrlKey || e.metaKey) {
 				// Ctrl+C / X / V / D on the timeline (never while typing in a box, so text copy still works)
-				if (e.altKey || s.mode !== "timeline") return
+				if (e.altKey) return
 				const key = e.key.toLowerCase()
+				if (key === "z" || key === "y") {
+					if (key === "y" || e.shiftKey) s.redo()
+					else s.undo()
+					e.preventDefault()
+					return
+				}
+				if (s.mode !== "timeline") return
 				if (key === "a") s.selectAll()
 				else if (key === "c") s.copySelection()
 				else if (key === "x") s.cutSelection()
@@ -174,7 +194,26 @@ export function App(): React.JSX.Element {
 	useTransport()
 	useCueFade()
 	useShortcuts()
+	useProjectionSync()
+	// first time the app opens, show the guide (after the saved show has had a moment to load)
+	useEffect(() => {
+		if (welcomeSeen()) return
+		const t = setTimeout(() => {
+			if (useStore.getState().fixtures.length === 0) useStore.getState().setHelpOpen(true)
+		}, 900)
+		return () => clearTimeout(t)
+	}, [])
 	const mode = useStore((s) => s.mode)
+	const workspace = useStore((s) => s.workspace)
+	if (workspace === "projection") {
+		return (
+			<div className="grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] gap-px overflow-hidden bg-line">
+				<TopBar />
+				<ProjectionView />
+				<HelpGuide />
+			</div>
+		)
+	}
 	return (
 		<div className="grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_minmax(220px,36vh)] gap-px overflow-hidden bg-line">
 			<TopBar />
@@ -184,6 +223,7 @@ export function App(): React.JSX.Element {
 				<Inspector />
 			</div>
 			{mode === "timeline" ? <Timeline /> : <CuePanel />}
+			<HelpGuide />
 		</div>
 	)
 }

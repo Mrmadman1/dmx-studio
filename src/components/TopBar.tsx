@@ -13,6 +13,9 @@ export function TopBar(): React.JSX.Element {
 	const setTestLights = useStore((s) => s.setTestLights)
 	const mode = useStore((s) => s.mode)
 	const setMode = useStore((s) => s.setMode)
+	const workspace = useStore((s) => s.workspace)
+	const setWorkspace = useStore((s) => s.setWorkspace)
+	const setHelpOpen = useStore((s) => s.setHelpOpen)
 	const [ports, setPorts] = useState<DmxPortInfo[]>([])
 	const [port, setPort] = useState("")
 	const [status, setStatus] = useState<DmxStatus>({ state: "disconnected" })
@@ -48,15 +51,26 @@ export function TopBar(): React.JSX.Element {
 		<header className="flex min-h-[44px] flex-wrap items-center gap-x-3 gap-y-1 bg-panel px-3 py-1">
 			<div className="font-semibold tracking-wide text-accent">DMX Studio</div>
 			<div className="flex overflow-hidden rounded border border-line">
-				{(["timeline", "cues"] as const).map((m) => (
-					<button
-						key={m}
-						className={`px-3 py-1 ${mode === m ? "bg-accent font-medium text-black" : "bg-panel2 hover:bg-line"}`}
-						onClick={() => setMode(m)}
-					>
-						{m === "timeline" ? "Timeline" : "Cues"}
-					</button>
-				))}
+				{(["timeline", "cues", "projection"] as const).map((m) => {
+					const active = m === "projection" ? workspace === "projection" : workspace === "show" && mode === m
+					return (
+						<button
+							key={m}
+							className={`px-3 py-1 ${active ? "bg-accent font-medium text-black" : "bg-panel2 hover:bg-line"}`}
+							onClick={() => {
+								if (m === "projection") {
+									setWorkspace("projection")
+									return
+								}
+								setWorkspace("show")
+								// switching mode stops playback, so only do it when the mode actually changes
+								if (mode !== m) setMode(m)
+							}}
+						>
+							{m === "timeline" ? "Timeline" : m === "cues" ? "Cues" : "Projection"}
+						</button>
+					)
+				})}
 			</div>
 			<div className="flex gap-1">
 				<button className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line" onClick={newProject}>
@@ -82,6 +96,13 @@ export function TopBar(): React.JSX.Element {
 					{saved ? "Saved ✓" : "Save as"}
 				</button>
 			</div>
+			<button
+				className="rounded border border-accent px-3 py-1 font-medium text-accent hover:bg-accent hover:text-black"
+				title="A short guide to how everything works"
+				onClick={() => setHelpOpen(true)}
+			>
+				? Help
+			</button>
 			<div className="flex-1" />
 			{hasBridge ? (
 				<>

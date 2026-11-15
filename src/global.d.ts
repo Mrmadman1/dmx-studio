@@ -18,7 +18,25 @@ export interface DmxApi {
 	onStatus: (cb: (s: DmxStatus) => void) => () => void
 }
 
+export interface DisplayInfo {
+	id: number
+	label: string
+	width: number
+	height: number
+}
+
 export interface StudioApi {
+	/** the connected screens, for choosing where the projector output goes */
+	projectionDisplays: () => Promise<DisplayInfo[]>
+	/** pop the clean output into a borderless fullscreen window on that display */
+	projectionOpen: (displayId: number) => Promise<boolean>
+	projectionClose: () => Promise<void>
+	/** hand the output window the current projection setup (JSON) */
+	projectionSend: (json: string) => void
+	projectionGet: () => Promise<string | null>
+	onProjectionState: (cb: (json: string) => void) => () => void
+	/** whether the output window is open */
+	onProjectionStatus: (cb: (open: boolean) => void) => () => void
 	pathForFile: (file: File) => string
 	openAudio: () => Promise<string[]>
 	openVideo: () => Promise<string | null>

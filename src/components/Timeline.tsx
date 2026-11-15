@@ -171,6 +171,8 @@ export function Timeline(): React.JSX.Element {
 	const frames = useStore((s) => s.frames)
 	const selection = useStore((s) => s.selection)
 	const hasClipboard = useStore((s) => s.clipboard !== null)
+	const undoDepth = useStore((s) => s.undoDepth)
+	const redoDepth = useStore((s) => s.redoDepth)
 	const playhead = useStore((s) => s.playhead)
 	const playing = useStore((s) => s.playing)
 	const zoom = useStore((s) => s.zoom)
@@ -375,6 +377,24 @@ export function Timeline(): React.JSX.Element {
 						title="Copy the selection right after the original (Ctrl+D)"
 					>
 						Duplicate
+					</button>
+				</span>
+				<span className="flex gap-1">
+					<button
+						className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+						disabled={undoDepth === 0}
+						onClick={() => st().undo()}
+						title="Undo the last change (Ctrl+Z)"
+					>
+						Undo
+					</button>
+					<button
+						className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+						disabled={redoDepth === 0}
+						onClick={() => st().redo()}
+						title="Redo (Ctrl+Y or Ctrl+Shift+Z)"
+					>
+						Redo
 					</button>
 				</span>
 				<button
