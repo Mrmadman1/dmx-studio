@@ -1,6 +1,6 @@
 # DMX Studio
 
-Free, open-source DMX platform for lighting and projection mapping. An easy light-show editor for Windows: lay out your lights, drop clips on a timeline, sync them to music, and send it all to real DMX fixtures through a USB-DMX cable. Built to be friendly if you're new to DMX.
+Free, open-source DMX platform for lighting and projection mapping. An easy light-show editor for Windows: lay out your lights, drop clips on a timeline, sync them to music, and send it all to real DMX fixtures through a USB-DMX cable or professional setup. Built to be friendly if you're new to DMX.
 
 ## Features
 
