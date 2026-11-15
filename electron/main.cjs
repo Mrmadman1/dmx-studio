@@ -72,6 +72,10 @@ ipcMain.handle("dialog:openVideo", async () => {
 	return r.canceled ? null : (r.filePaths[0] ?? null)
 })
 
+// The 3D demo stage that ships with the app (a Vectorworks export, in millimetres).
+const DEMO_STAGE = path.join(__dirname, "..", "assets", "stages", "slaitinis-stogas.fbx")
+ipcMain.handle("stage:demoUrl", () => media.register(DEMO_STAGE))
+
 // A localhost URL the page can stream a picked media file from (null if it's missing or not media).
 ipcMain.handle("media:url", (_e, p) => media.register(p))
 

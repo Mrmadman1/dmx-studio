@@ -20,6 +20,9 @@ export function toProject(): ProjectData {
 		currentCue: s.currentCue,
 		reference: s.reference,
 		accents: s.accents,
+		stageView: s.stageView,
+		stage: s.stage,
+		frames: s.frames,
 	}
 }
 
@@ -81,7 +84,10 @@ export function usePersistence(): void {
 					s.mode !== prev.mode ||
 					s.currentCue !== prev.currentCue ||
 					s.reference !== prev.reference ||
-					s.accents !== prev.accents
+					s.accents !== prev.accents ||
+					s.stageView !== prev.stageView ||
+					s.stage !== prev.stage ||
+					s.frames !== prev.frames
 				if (!changed) return
 				clearTimeout(timer)
 				timer = setTimeout(flush, 800)

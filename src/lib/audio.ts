@@ -140,7 +140,8 @@ export function startPlayback(clips: AudioClip[], from: number): { ctxTime: numb
 		src.buffer = loaded.buffer
 		src.connect(c.destination)
 		const offset = Math.max(0, from - clip.start)
-		src.start(ctxTime + Math.max(0, clip.start - from), offset, clip.duration - offset)
+		// a clip trimmed at the front starts partway into the file
+		src.start(ctxTime + Math.max(0, clip.start - from), (clip.offset ?? 0) + offset, clip.duration - offset)
 		sources.push(src)
 	}
 	return { ctxTime, tl: from }

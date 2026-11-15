@@ -1,7 +1,9 @@
 import { create } from "zustand"
 
-import { profileById } from "./profiles"
+import { type PoseFrame, cleanMotion, currentPose, motionOf, poseAt, validFrames } from "./motion"
+import { type MotionSpec, profileById } from "./profiles"
 import { type Accent, type Clip, MIN_CLIP, effectiveValues, showEnd } from "./show"
+import { type Vec3, cleanVec3 } from "./stage"
 
 export interface Fixture {
 	id: string
@@ -10,6 +12,12 @@ export interface Fixture {
 	/** 1-512, the DMX start address set on the physical light */
 	address: number
 	values: number[]
+	/** where the light sits in the 3D stage, metres (unset until moved: it gets a default slot on the truss) */
+	pos?: Vec3
+	/** its rotation in the 3D stage, radians (x, y, z) */
+	rot?: Vec3
+	/** moving heads: motor limits tuned to match the real fixture (anything unset uses the profile's defaults) */
+	motion?: Partial<MotionSpec>
 }
 
 /** A saved look: every light's channel values, plus how long to fade to it. */
@@ -30,8 +38,10 @@ export interface AudioClip {
 	start: number
 	duration: number
 	bpm?: number
-	/** beat times in seconds, relative to the start of the clip */
+	/** beat times in seconds from the start of the audio FILE (not the clip) */
 	beats?: number[]
+	/** seconds into the file where this clip begins (trimmed off the front); 0 or unset = from the start */
+	offset?: number
 }
 
 export type AudioStatus = "loading" | "ready" | "missing"
@@ -41,6 +51,7 @@ export interface Clipboard {
 	clips: Clip[]
 	accents: Accent[]
 	audio: AudioClip[]
+	frames: PoseFrame[]
 	/** each copied clip's track position (index into the lights list) when it was copied, so a paste can keep the layout */
 	trackOf: Record<string, number>
 }
@@ -49,9 +60,14 @@ export interface Clipboard {
 export interface Reference {
 	path: string
 	name: string
-	/** timeline second at which the video's own 0:00 plays (can be negative) */
+	/** timeline second at which the part of the video we use begins to play */
 	start: number
+	/** the whole video's length */
 	duration: number
+	/** seconds into the video where the part we use begins (0 = from the very start) */
+	trimIn: number
+	/** seconds of the video we use, counting from trimIn: this is the bar's length on the timeline */
+	length: number
 	/** silence the video's own sound */
 	muted: boolean
 	visible: boolean
@@ -87,11 +103,17 @@ function validReference(r: unknown): Reference | null {
 	if (!r || typeof r !== "object") return null
 	const v = r as Partial<Reference>
 	if (typeof v.path !== "string" || !v.path) return null
+	const num = (x: unknown, fallback: number): number => (typeof x === "number" && Number.isFinite(x) ? x : fallback)
+	const duration = num(v.duration, 1) > 0 ? num(v.duration, 1) : 1
+	// shows saved before trimming existed have neither field: they use the whole video
+	const trimIn = clamp(num(v.trimIn, 0), 0, Math.max(0, duration - MIN_CLIP))
 	return {
 		path: v.path,
 		name: typeof v.name === "string" ? v.name : v.path,
-		start: Number.isFinite(v.start) ? (v.start as number) : 0,
-		duration: Number.isFinite(v.duration) && (v.duration as number) > 0 ? (v.duration as number) : 1,
+		start: num(v.start, 0),
+		duration,
+		trimIn,
+		length: clamp(num(v.length, duration - trimIn), Math.min(MIN_CLIP, duration - trimIn), duration - trimIn),
 		muted: v.muted === true,
 		visible: v.visible !== false,
 	}
@@ -111,6 +133,9 @@ export interface ProjectData {
 	currentCue: number
 	reference: Reference | null
 	accents: Accent[]
+	stageView: "2d" | "3d"
+	stage: "demo" | null
+	frames: PoseFrame[]
 }
 
 type Looks = Record<string, number[]>
@@ -119,6 +144,8 @@ interface State {
 	fixtures: Fixture[]
 	selectedId: string | null
 	blackout: boolean
+	/** wiring check: force every light to full white, ignoring the timeline and cues (runtime only) */
+	testLights: boolean
 
 	mode: "timeline" | "cues"
 	cues: Cue[]
@@ -138,8 +165,18 @@ interface State {
 	accents: Accent[]
 	selectedAccentId: string | null
 	clipboard: Clipboard | null
-	/** every selected timeline item (clips, accents, audio). The single-selection ids below mirror it when exactly one is selected. */
+	/** which stage view is showing in the middle panel */
+	stageView: "2d" | "3d"
+	/** which 3D stage model the show uses (saved with the show) */
+	stage: "demo" | null
+	/** loading state of that model (runtime only) */
+	stageStatus: "idle" | "loading" | "ready" | "error"
+	stageError: string
+	/** every selected timeline item (clips, accents, audio, frames). The single-selection ids below mirror it when exactly one is selected. */
 	selection: string[]
+	/** moving-head poses over time: where each head should be (the motors then get there as fast as they can) */
+	frames: PoseFrame[]
+	selectedFrameId: string | null
 
 	clips: Clip[]
 	selectedClipId: string | null
@@ -158,6 +195,7 @@ interface State {
 	setAddress: (id: string, address: number) => void
 	renameFixture: (id: string, name: string) => void
 	setBlackout: (on: boolean) => void
+	setTestLights: (on: boolean) => void
 
 	addClip: (fixtureId: string, at: number) => void
 	removeClip: (id: string) => void
@@ -205,6 +243,15 @@ interface State {
 	selectAccent: (id: string | null) => void
 	updateAccent: (id: string, patch: Partial<Omit<Accent, "id">>) => void
 
+	addFrame: (fixtureId: string, at: number) => void
+	updateFrame: (id: string, patch: Partial<Omit<PoseFrame, "id" | "fixtureId">>) => void
+	/** tune a moving head's motors to match the real fixture (null = back to the profile's defaults) */
+	setMotion: (fixtureId: string, patch: Partial<MotionSpec> | null) => void
+	setStageView: (v: "2d" | "3d") => void
+	setStage: (s: "demo" | null) => void
+	setStageStatus: (status: "idle" | "loading" | "ready" | "error", error?: string) => void
+	setFixtureTransform: (id: string, pos: Vec3, rot: Vec3) => void
+
 	setSelection: (ids: string[]) => void
 	toggleSelected: (id: string) => void
 	selectAll: () => void
@@ -243,12 +290,13 @@ export function mediaSpans(s: {
 	audioClips: AudioClip[]
 	reference: Reference | null
 }): { start: number; duration: number }[] {
-	return s.reference ? [...s.audioClips, { start: s.reference.start, duration: s.reference.duration }] : s.audioClips
+	return s.reference ? [...s.audioClips, { start: s.reference.start, duration: s.reference.length }] : s.audioClips
 }
 
 const snapshot = (fixtures: Fixture[]): Looks => Object.fromEntries(fixtures.map((f) => [f.id, f.values.slice()]))
 
-const fadable = (kind: string): boolean => kind === "dimmer" || kind === "red" || kind === "green" || kind === "blue"
+const fadable = (kind: string): boolean =>
+	kind === "dimmer" || kind === "red" || kind === "green" || kind === "blue" || kind === "pan" || kind === "tilt"
 
 /** Write a cue's look straight onto the fixtures (those the cue knows about). */
 function applyLooks(fixtures: Fixture[], looks: Looks): Fixture[] {
@@ -304,6 +352,7 @@ let clipCounter = 1
 let cueCounter = 1
 let audioCounter = 1
 let accentCounter = 1
+let frameCounter = 1
 
 const patchClip = (clips: Clip[], id: string, fn: (c: Clip) => Clip): Clip[] =>
 	clips.map((c) => (c.id === id ? fn(c) : c))
@@ -311,6 +360,7 @@ const patchClip = (clips: Clip[], id: string, fn: (c: Clip) => Clip): Clip[] =>
 const nextClipId = (): string => `clip${Date.now()}${clipCounter++}`
 const nextAccentId = (): string => `acc${Date.now()}${accentCounter++}`
 const nextAudioId = (): string => `aud${Date.now()}${audioCounter++}`
+const nextFrameId = (): string => `frm${Date.now()}${frameCounter++}`
 
 /**
  * Keep the single-selection ids (used by the inspector) and the multi-selection list in step, whichever
@@ -321,19 +371,24 @@ function syncSelection(s: State, p: Partial<State>): Partial<State> {
 	if (p.selection) {
 		const one = p.selection.length === 1 ? p.selection[0] : null
 		const clip = one ? (p.clips ?? s.clips).find((c) => c.id === one) : undefined
+		const frame = one ? (p.frames ?? s.frames).find((f) => f.id === one) : undefined
 		return {
 			...p,
 			selectedClipId: clip ? clip.id : null,
 			selectedAudioId: one && (p.audioClips ?? s.audioClips).some((a) => a.id === one) ? one : null,
 			selectedAccentId: one && (p.accents ?? s.accents).some((a) => a.id === one) ? one : null,
-			...(clip ? { selectedId: clip.fixtureId } : {}),
+			selectedFrameId: frame ? frame.id : null,
+			...(clip ? { selectedId: clip.fixtureId } : frame ? { selectedId: frame.fixtureId } : {}),
 		}
 	}
-	if ("selectedClipId" in p || "selectedAudioId" in p || "selectedAccentId" in p) {
-		const pick = (k: "selectedClipId" | "selectedAudioId" | "selectedAccentId"): string | null =>
-			(k in p ? p[k] : s[k]) ?? null
-		const ids = [pick("selectedClipId"), pick("selectedAudioId"), pick("selectedAccentId")]
-		return { ...p, selection: ids.filter((x): x is string => !!x) }
+	type Key = "selectedClipId" | "selectedAudioId" | "selectedAccentId" | "selectedFrameId"
+	if ("selectedClipId" in p || "selectedAudioId" in p || "selectedAccentId" in p || "selectedFrameId" in p) {
+		// picking a clip, audio or accent replaces a selected frame, unless the update says otherwise
+		const picked = p.selectedClipId || p.selectedAudioId || p.selectedAccentId
+		const q: Partial<State> = picked && !("selectedFrameId" in p) ? { ...p, selectedFrameId: null } : p
+		const pick = (k: Key): string | null => (k in q ? q[k] : s[k]) ?? null
+		const ids = [pick("selectedClipId"), pick("selectedAudioId"), pick("selectedAccentId"), pick("selectedFrameId")]
+		return { ...q, selection: ids.filter((x): x is string => !!x) }
 	}
 	return p
 }
@@ -344,13 +399,15 @@ function snapshotSelection(s: State): Clipboard | null {
 	const clips = s.clips.filter((c) => ids.has(c.id))
 	const accents = s.accents.filter((a) => ids.has(a.id))
 	const audio = s.audioClips.filter((a) => ids.has(a.id))
-	if (!clips.length && !accents.length && !audio.length) return null
+	const frames = s.frames.filter((f) => ids.has(f.id))
+	if (!clips.length && !accents.length && !audio.length && !frames.length) return null
 	const trackOf: Record<string, number> = {}
 	for (const c of clips) trackOf[c.id] = s.fixtures.findIndex((f) => f.id === c.fixtureId)
 	return {
 		clips: clips.map((c) => ({ ...c })),
 		accents: accents.map((a) => ({ ...a, fixtureIds: a.fixtureIds?.slice() ?? null })),
 		audio: audio.map((a) => ({ ...a, beats: a.beats?.slice() })),
+		frames: frames.map((f) => ({ ...f })),
 		trackOf,
 	}
 }
@@ -386,8 +443,8 @@ function placeGroup(
 	cb: Clipboard,
 	at: number,
 	useSelectedTrack: boolean,
-): { clips: Clip[]; accents: Accent[]; audio: AudioClip[]; end: number } | null {
-	const starts = [...cb.clips, ...cb.accents, ...cb.audio].map((x) => x.start)
+): { clips: Clip[]; accents: Accent[]; audio: AudioClip[]; frames: PoseFrame[]; end: number } | null {
+	const starts = [...cb.clips, ...cb.accents, ...cb.audio, ...cb.frames].map((x) => x.start)
 	if (!starts.length) return null
 	const offset = Math.max(0, at) - Math.min(...starts)
 	const n = s.fixtures.length
@@ -418,9 +475,22 @@ function placeGroup(
 		fixtureIds: a.fixtureIds?.slice() ?? null,
 	}))
 	const audio = cb.audio.map((a) => ({ ...a, id: nextAudioId(), start: a.start + offset + shift, beats: a.beats?.slice() }))
-	const placed = [...placedClips, ...accents, ...audio]
+	// frames go back on their own head; if the copied frames all came from one head and another moving head is selected, they go there
+	const selectedFixture = useSelectedTrack ? s.fixtures.find((f) => f.id === s.selectedId) : undefined
+	const oneSource = new Set(cb.frames.map((x) => x.fixtureId)).size === 1
+	const frames = cb.frames.flatMap((fr): PoseFrame[] => {
+		const fixtureId =
+			selectedFixture && motionOf(selectedFixture) && oneSource
+				? selectedFixture.id
+				: s.fixtures.some((f) => f.id === fr.fixtureId)
+					? fr.fixtureId
+					: undefined
+		if (!fixtureId) return []
+		return [{ ...fr, id: nextFrameId(), fixtureId, start: fr.start + offset + shift }]
+	})
+	const placed: { start: number; duration?: number }[] = [...placedClips, ...accents, ...audio, ...frames]
 	if (!placed.length) return null // e.g. only clips were copied and there are no lights to put them on
-	return { clips: placedClips, accents, audio, end: Math.max(...placed.map((x) => x.start + x.duration)) }
+	return { clips: placedClips, accents, audio, frames, end: Math.max(...placed.map((x) => x.start + (x.duration ?? 0))) }
 }
 
 export const useStore = create<State>((rawSet, get) => {
@@ -431,6 +501,7 @@ export const useStore = create<State>((rawSet, get) => {
 	fixtures: [],
 	selectedId: null,
 	blackout: false,
+	testLights: false,
 	mode: "timeline",
 	cues: [],
 	currentCue: -1,
@@ -445,7 +516,13 @@ export const useStore = create<State>((rawSet, get) => {
 	accents: [],
 	selectedAccentId: null,
 	clipboard: null,
+	stageView: "2d",
+	stage: null,
+	stageStatus: "idle",
+	stageError: "",
 	selection: [],
+	frames: [],
+	selectedFrameId: null,
 	clips: [],
 	selectedClipId: null,
 	playhead: 0,
@@ -456,9 +533,13 @@ export const useStore = create<State>((rawSet, get) => {
 	addFixture: (profileId) =>
 		set((s) => {
 			const profile = profileById(profileId)
+			// number each kind of light from what's already on stage (a counter would restart after a saved show is reopened)
+			const base = profile.name.replace(/^Generic /, "")
+			let n = s.fixtures.filter((f) => f.profileId === profileId).length + 1
+			while (s.fixtures.some((f) => f.name === `${base} ${n}`)) n++
 			const fixture: Fixture = {
-				id: `fx${Date.now()}${counter}`,
-				name: `${profile.name.replace(/^Generic /, "")} ${counter++}`,
+				id: `fx${Date.now()}${counter++}`,
+				name: `${base} ${n}`,
 				profileId,
 				address: nextFreeAddress(s.fixtures, profile.channels.length),
 				values: profile.channels.map((c) => c.default),
@@ -469,6 +550,7 @@ export const useStore = create<State>((rawSet, get) => {
 		set((s) => ({
 			fixtures: s.fixtures.filter((f) => f.id !== id),
 			clips: s.clips.filter((c) => c.fixtureId !== id),
+			frames: s.frames.filter((f) => f.fixtureId !== id),
 			// an accent aimed only at this light has nothing left to hit
 			accents: s.accents.flatMap((a) => {
 				if (!a.fixtureIds) return [a]
@@ -512,6 +594,7 @@ export const useStore = create<State>((rawSet, get) => {
 	renameFixture: (id, name) =>
 		set((s) => ({ fixtures: s.fixtures.map((f) => (f.id === id ? { ...f, name } : f)) })),
 	setBlackout: (blackout) => set({ blackout }),
+	setTestLights: (testLights) => set({ testLights }),
 
 	addClip: (fixtureId, at) =>
 		set((s) => {
@@ -613,12 +696,12 @@ export const useStore = create<State>((rawSet, get) => {
 		set((s) => {
 			if (s.playing) return { playing: false }
 			const end = showEnd(s.clips, mediaSpans(s))
-			return { playing: end > 0, playhead: s.playhead >= end ? 0 : s.playhead }
+			return { playing: end > 0, testLights: false, playhead: s.playhead >= end ? 0 : s.playhead }
 		}),
 	setZoom: (zoom) => set({ zoom: clamp(zoom, 15, 300) }),
 	setSnap: (snap) => set({ snap }),
 
-	setMode: (mode) => set({ mode, playing: false, fading: null }),
+	setMode: (mode) => set({ mode, playing: false, fading: null, testLights: false }),
 	recordCue: () =>
 		set((s) => {
 			const cue: Cue = {
@@ -739,7 +822,9 @@ export const useStore = create<State>((rawSet, get) => {
 			const span = (60 / a.bpm) * every
 			// a punchy flash that decays before the next one lands
 			const dur = Math.min(span * 0.9, 2)
-			const times = a.beats.filter((_, i) => i % every === 0).map((b) => a.start + b)
+			const offset = a.offset ?? 0
+			const inClip = a.beats.map((b) => b - offset).filter((b) => b >= 0 && b < a.duration)
+			const times = inClip.filter((_, i) => i % every === 0).map((b) => a.start + b)
 			const next = s.clips.slice()
 			fixtureIds.forEach((fid, fi) => {
 				times.forEach((t, bi) => {
@@ -818,11 +903,57 @@ export const useStore = create<State>((rawSet, get) => {
 			}),
 		})),
 
+	addFrame: (fixtureId, at) =>
+		set((s) => {
+			const f = s.fixtures.find((x) => x.id === fixtureId)
+			if (!f || !motionOf(f)) return {}
+			const t = Math.max(0, at)
+			// start from where the head is at that moment, so adding a frame never makes it jump
+			const pose = currentPose(f, s.frames, t)
+			const r = (n: number): number => Math.round(n * 10) / 10
+			const frame: PoseFrame = {
+				id: nextFrameId(),
+				fixtureId,
+				start: t,
+				pan: r(pose?.pan ?? 0),
+				tilt: r(pose?.tilt ?? 0),
+				ease: "smooth",
+			}
+			return { frames: [...s.frames, frame], selection: [frame.id] }
+		}),
+	updateFrame: (id, patch) =>
+		set((s) => {
+			const fr = s.frames.find((x) => x.id === id)
+			const f = fr && s.fixtures.find((x) => x.id === fr.fixtureId)
+			const spec = f ? motionOf(f) : null
+			if (!fr || !spec) return {}
+			const next = { ...fr, ...patch }
+			// a head can only point where its motors can turn
+			next.pan = clamp(next.pan, -spec.panRange / 2, spec.panRange / 2)
+			next.tilt = clamp(next.tilt, -spec.tiltRange / 2, spec.tiltRange / 2)
+			next.start = Math.max(0, next.start)
+			if (next.ease !== "linear" && next.ease !== "hold") next.ease = "smooth"
+			return { frames: s.frames.map((x) => (x.id === id ? next : x)) }
+		}),
+	setMotion: (fixtureId, patch) =>
+		set((s) => ({
+			fixtures: s.fixtures.map((f) =>
+				f.id === fixtureId ? { ...f, motion: patch === null ? undefined : cleanMotion({ ...f.motion, ...cleanMotion(patch) }) } : f,
+			),
+		})),
+	setStageView: (stageView) => set({ stageView }),
+	setStage: (stage) => set({ stage }),
+	setStageStatus: (stageStatus, stageError = "") => set({ stageStatus, stageError }),
+	setFixtureTransform: (id, pos, rot) =>
+		set((s) => ({ fixtures: s.fixtures.map((f) => (f.id === id ? { ...f, pos, rot } : f)) })),
+
 	setSelection: (ids) => set({ selection: ids }),
 	toggleSelected: (id) =>
 		set((s) => ({ selection: s.selection.includes(id) ? s.selection.filter((x) => x !== id) : [...s.selection, id] })),
 	selectAll: () =>
-		set((s) => ({ selection: [...s.clips.map((c) => c.id), ...s.accents.map((a) => a.id), ...s.audioClips.map((a) => a.id)] })),
+		set((s) => ({
+			selection: [...s.clips.map((c) => c.id), ...s.accents.map((a) => a.id), ...s.audioClips.map((a) => a.id), ...s.frames.map((f) => f.id)],
+		})),
 	deleteSelection: () =>
 		set((s) => {
 			const ids = new Set(s.selection)
@@ -830,6 +961,7 @@ export const useStore = create<State>((rawSet, get) => {
 				clips: s.clips.filter((c) => !ids.has(c.id)),
 				accents: s.accents.filter((a) => !ids.has(a.id)),
 				audioClips: s.audioClips.filter((a) => !ids.has(a.id)),
+				frames: s.frames.filter((f) => !ids.has(f.id)),
 				selection: [],
 			}
 		}),
@@ -858,7 +990,7 @@ export const useStore = create<State>((rawSet, get) => {
 			}
 			const d = clamp(delta, lo, hi)
 			const at = <T extends { id: string; start: number }>(x: T): T => (moving.has(x.id) ? { ...x, start: initial[x.id] + d } : x)
-			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at) }
+			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at), frames: s.frames.map(at) }
 		}),
 	copySelectionInPlace: (ids) => {
 		const s = get()
@@ -871,10 +1003,12 @@ export const useStore = create<State>((rawSet, get) => {
 		const audio = s.audioClips
 			.filter((a) => want.has(a.id))
 			.map((a) => ({ ...a, id: (map[a.id] = nextAudioId()), beats: a.beats?.slice() }))
+		const frames = s.frames.filter((f) => want.has(f.id)).map((f) => ({ ...f, id: (map[f.id] = nextFrameId()) }))
 		set({
 			clips: [...s.clips, ...clips],
 			accents: [...s.accents, ...accents],
 			audioClips: [...s.audioClips, ...audio],
+			frames: [...s.frames, ...frames],
 			selection: Object.values(map),
 		})
 		return map
@@ -888,7 +1022,7 @@ export const useStore = create<State>((rawSet, get) => {
 			)
 			if (shift === 0) return {}
 			const at = <T extends { id: string; start: number }>(x: T): T => (moving.has(x.id) ? { ...x, start: x.start + shift } : x)
-			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at) }
+			return { clips: s.clips.map(at), accents: s.accents.map(at), audioClips: s.audioClips.map(at), frames: s.frames.map(at) }
 		}),
 
 	copySelection: () => {
@@ -910,7 +1044,8 @@ export const useStore = create<State>((rawSet, get) => {
 				clips: [...s.clips, ...placed.clips],
 				accents: [...s.accents, ...placed.accents],
 				audioClips: [...s.audioClips, ...placed.audio],
-				selection: [...placed.clips, ...placed.accents, ...placed.audio].map((x) => x.id),
+				frames: [...s.frames, ...placed.frames],
+				selection: [...placed.clips, ...placed.accents, ...placed.audio, ...placed.frames].map((x) => x.id),
 				// move past the paste so the next one chains on (but never shove the playhead during playback)
 				...(s.playing ? {} : { playhead: placed.end }),
 			}
@@ -919,23 +1054,39 @@ export const useStore = create<State>((rawSet, get) => {
 		set((s) => {
 			const cb = snapshotSelection(s)
 			if (!cb) return {}
-			const end = Math.max(...[...cb.clips, ...cb.accents, ...cb.audio].map((x) => x.start + x.duration))
+			const end = Math.max(...[...cb.clips, ...cb.accents, ...cb.audio, ...cb.frames].map((x) => x.start + ("duration" in x ? x.duration : 0)))
 			const placed = placeGroup(s, cb, end, false)
 			if (!placed) return {}
 			return {
 				clips: [...s.clips, ...placed.clips],
 				accents: [...s.accents, ...placed.accents],
 				audioClips: [...s.audioClips, ...placed.audio],
-				selection: [...placed.clips, ...placed.accents, ...placed.audio].map((x) => x.id),
+				frames: [...s.frames, ...placed.frames],
+				selection: [...placed.clips, ...placed.accents, ...placed.audio, ...placed.frames].map((x) => x.id),
 			}
 		}),
 
 	setReference: (reference) => set({ reference }),
-	updateReference: (patch) => set((s) => (s.reference ? { reference: { ...s.reference, ...patch } } : {})),
+	updateReference: (patch) =>
+		set((s) => {
+			if (!s.reference) return {}
+			const next = { ...s.reference, ...patch }
+			// keep the used part inside the video: it can't begin before 0, run past the end, or be shorter than a hair
+			next.trimIn = clamp(next.trimIn, 0, Math.max(0, next.duration - MIN_CLIP))
+			next.length = clamp(next.length, MIN_CLIP, Math.max(MIN_CLIP, next.duration - next.trimIn))
+			return { reference: next }
+		}),
 
-	loadProject: (p) =>
+	loadProject: (p) => {
+		const fixtures = Array.isArray(p.fixtures)
+			? p.fixtures.map((f) => ({ ...f, pos: cleanVec3(f.pos), rot: cleanVec3(f.rot), motion: cleanMotion(f.motion) }))
+			: []
 		set({
-			fixtures: Array.isArray(p.fixtures) ? p.fixtures : [],
+			fixtures,
+			frames: validFrames(p.frames).filter((fr) => fixtures.some((f) => f.id === fr.fixtureId)),
+			selectedFrameId: null,
+			stageView: p.stageView === "3d" ? "3d" : "2d",
+			stage: p.stage === "demo" ? "demo" : null,
 			clips: Array.isArray(p.clips) ? p.clips : [],
 			cues: Array.isArray(p.cues) ? p.cues : [],
 			audioClips: Array.isArray(p.audioClips) ? p.audioClips : [],
@@ -957,22 +1108,42 @@ export const useStore = create<State>((rawSet, get) => {
 			playing: false,
 			fading: null,
 			blackout: false,
-		}),
+		})
+	},
 	}
 })
+
+/**
+ * The wiring-check frame: every light at full white (dimmer and colour channels up, strobe/macro/speed off),
+ * whatever the show says. If a light stays dark under this, the problem is cabling or its settings, not the show.
+ */
+export function buildTestUniverse(fixtures: Fixture[]): Uint8Array {
+	const out = new Uint8Array(512)
+	for (const f of fixtures) {
+		profileById(f.profileId).channels.forEach((c, i) => {
+			const slot = f.address - 1 + i
+			if (slot < 0 || slot >= 512) return
+			// pan and tilt to the middle (pointing straight down), not an end stop
+			out[slot] = c.kind === "dimmer" || c.kind === "red" || c.kind === "green" || c.kind === "blue" ? 255 : c.kind === "pan" || c.kind === "tilt" ? 128 : 0
+		})
+	}
+	return out
+}
 
 /** Collapse every fixture into the 512 DMX slots that go on the wire. */
 export function buildUniverse(
 	fixtures: Fixture[],
 	clips: Clip[],
 	accents: Accent[],
+	frames: PoseFrame[],
 	t: number,
 	blackout: boolean,
 ): Uint8Array {
 	const out = new Uint8Array(512)
 	if (blackout) return out
 	for (const f of fixtures) {
-		effectiveValues(f, clips, t, accents).forEach((v, i) => {
+		// a moving head with frames is told where its motors REALLY are (the physics-limited pose), not where the frames wish it were
+		effectiveValues(f, clips, t, accents, poseAt(f, frames, t)).forEach((v, i) => {
 			const slot = f.address - 1 + i
 			if (slot >= 0 && slot < 512) out[slot] = v
 		})

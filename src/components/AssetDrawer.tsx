@@ -262,8 +262,27 @@ function ReferenceTab(): React.JSX.Element {
 			<section className="space-y-2 rounded border border-line bg-panel2 p-2">
 				<h3 className="text-xs uppercase tracking-wider text-accent">Line it up</h3>
 				<p className="text-muted">
-					Where the video's 0:00 plays on the timeline. You can also just drag the video bar in the timeline.
+					Where the video begins on the timeline. On the timeline you can drag the purple bar to move it, drag
+					either edge to trim (cut an intro or outro), or hold Alt and drag to slide the video under the bar.
 				</p>
+				<p className="text-muted">
+					Using {fmtLen(reference.trimIn)} to {fmtLen(reference.trimIn + reference.length)} of the{" "}
+					{fmtLen(reference.duration)} video.
+				</p>
+				{(reference.trimIn > 0.005 || reference.length < reference.duration - 0.005) && (
+					<button
+						className={`${small} w-full`}
+						onClick={() =>
+							st().updateReference({
+								start: Math.max(0, reference.start - reference.trimIn),
+								trimIn: 0,
+								length: reference.duration,
+							})
+						}
+					>
+						Reset trim (use the whole video)
+					</button>
+				)}
 				<div className="flex items-center gap-1">
 					<button className={small} onClick={() => nudge(-1)}>
 						−1

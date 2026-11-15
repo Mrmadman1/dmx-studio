@@ -9,6 +9,8 @@ export function TopBar(): React.JSX.Element {
 	const [saved, setSaved] = useState(false)
 	const blackout = useStore((s) => s.blackout)
 	const setBlackout = useStore((s) => s.setBlackout)
+	const testLights = useStore((s) => s.testLights)
+	const setTestLights = useStore((s) => s.setTestLights)
 	const mode = useStore((s) => s.mode)
 	const setMode = useStore((s) => s.setMode)
 	const [ports, setPorts] = useState<DmxPortInfo[]>([])
@@ -122,6 +124,13 @@ export function TopBar(): React.JSX.Element {
 			) : (
 				<span className="text-muted">Preview only (open in the desktop app to output DMX)</span>
 			)}
+			<button
+				className={`rounded px-3 py-1 font-medium ${testLights ? "bg-amber-400 text-black" : "border border-line bg-panel2 hover:bg-line"}`}
+				title="Wiring check: sends full white to every light, ignoring the timeline. If a light stays dark, it's the cable, address or mode. Press again (or Play) to stop."
+				onClick={() => setTestLights(!testLights)}
+			>
+				{testLights ? "Test ON: all white" : "Test lights"}
+			</button>
 			<button
 				className={`rounded px-3 py-1 font-medium ${blackout ? "bg-red-500 text-white" : "border border-line bg-panel2 hover:bg-line"}`}
 				onClick={() => setBlackout(!blackout)}

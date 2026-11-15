@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 
 import { addAudioFromPath, getLoaded, pickAudioFiles } from "../lib/audio"
+import { type Arrival, type PoseFrame, motionOf, motionReport } from "../lib/motion"
 import { loadReferenceFromPath } from "../lib/reference"
-import { type Accent, type Clip, showEnd } from "../lib/show"
-import { type AudioClip, type Reference, lightTime, mediaSpans, useStore } from "../lib/store"
+import { type Accent, type Clip, showEnd, slipPatch, trimEndPatch, trimStartPatch } from "../lib/show"
+import { type AudioClip, type Fixture, type Reference, lightTime, mediaSpans, useStore } from "../lib/store"
 
 const LABEL_W = 150
 const RULER_H = 26
@@ -17,6 +18,7 @@ const AUDIO_FILE = /\.(mp3|wav|ogg|flac|m4a|aac|opus)$/i
 const VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv)$/i
 const VIDEO_H = 40
 const ACCENT_H = 34
+const MOVE_H = 34
 const ACCENT_COLOR = "255,176,46"
 
 function fmt(t: number): string {
@@ -26,7 +28,7 @@ function fmt(t: number): string {
 
 /** Snap a time to the playhead, zero, every clip edge and every detected beat when close enough on screen. */
 function snapTime(t: number, exclude?: string | string[]): number {
-	const { clips, accents, audioClips, reference, playhead, snap, zoom } = useStore.getState()
+	const { clips, accents, frames, audioClips, reference, playhead, snap, zoom } = useStore.getState()
 	if (!snap) return t
 	const skip = new Set(Array.isArray(exclude) ? exclude : exclude ? [exclude] : [])
 	const points = [0, playhead]
@@ -35,11 +37,17 @@ function snapTime(t: number, exclude?: string | string[]): number {
 	}
 	for (const a of audioClips) {
 		if (!skip.has(a.id)) points.push(a.start, a.start + a.duration)
-		for (const b of a.beats ?? []) points.push(a.start + b)
+		for (const b of a.beats ?? []) {
+			const at = a.start + b - (a.offset ?? 0)
+			if (at >= a.start && at <= a.start + a.duration) points.push(at)
+		}
 	}
 	if (reference && !skip.has("video")) points.push(reference.start, reference.start + reference.duration)
 	for (const a of accents) {
 		if (!skip.has(a.id)) points.push(a.start, a.start + a.duration)
+	}
+	for (const fr of frames) {
+		if (!skip.has(fr.id)) points.push(fr.start)
 	}
 	let best = t
 	let bestDist = 8 / zoom
@@ -68,11 +76,13 @@ function startDrag(e: React.PointerEvent, onMove: (dx: number, ev: PointerEvent)
 
 const itemStart = (id: string): number | undefined => {
 	const s = useStore.getState()
-	return (s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id))?.start
+	return (
+		s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id) ?? s.frames.find((f) => f.id === id)
+	)?.start
 }
 const itemDuration = (id: string): number => {
 	const s = useStore.getState()
-	return (s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id))?.duration ?? 0
+	return (s.clips.find((c) => c.id === id) ?? s.accents.find((a) => a.id === id) ?? s.audioClips.find((a) => a.id === id))?.duration ?? 0 // frames are instants
 }
 
 /**
@@ -139,8 +149,14 @@ function startGroupDrag(e: React.PointerEvent, grabbedId: string): void {
 		window.removeEventListener("pointermove", move)
 		window.removeEventListener("pointerup", up)
 		const s = useStore.getState()
-		if (copied) s.settleClips(ids) // dropped copies that landed on clips get pushed clear
-		else if (!moved && ids.length > 1) s.setSelection([grabbedId]) // plain click on one of a group: just that one
+		if (copied) {
+			s.settleClips(ids) // dropped copies that landed on clips get pushed clear
+		} else if (!moved) {
+			if (ids.length > 1) s.setSelection([grabbedId]) // plain click on one of a group: just that one
+			// clicking a frame jumps the playhead to it, so you see the head in that pose while you edit it
+			const frame = s.frames.find((f) => f.id === grabbedId)
+			if (frame && !s.playing) s.setPlayhead(frame.start)
+		}
 	}
 	window.addEventListener("pointermove", move)
 	window.addEventListener("pointerup", up)
@@ -152,6 +168,7 @@ export function Timeline(): React.JSX.Element {
 	const audioClips = useStore((s) => s.audioClips)
 	const reference = useStore((s) => s.reference)
 	const accents = useStore((s) => s.accents)
+	const frames = useStore((s) => s.frames)
 	const selection = useStore((s) => s.selection)
 	const hasClipboard = useStore((s) => s.clipboard !== null)
 	const playhead = useStore((s) => s.playhead)
@@ -196,6 +213,7 @@ export function Timeline(): React.JSX.Element {
 	const st = useStore.getState
 	const targetFixture = selectedId ?? fixtures[0]?.id
 	const selected = new Set(selection)
+	const selectedMover = !!(selectedId && fixtures.some((f) => f.id === selectedId && motionOf(f)))
 	const hasSelection = selection.length > 0
 	const hasClipSelected = clips.some((c) => selected.has(c.id))
 
@@ -309,6 +327,14 @@ export function Timeline(): React.JSX.Element {
 					title="Brighten the lights at the playhead for a moment (A). Tap A while the song plays to hit the beats live."
 				>
 					+ Accent
+				</button>
+				<button
+					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line disabled:opacity-40"
+					disabled={!selectedMover}
+					onClick={() => selectedId && st().addFrame(selectedId, lightTime(st()))}
+					title="Add a movement frame for the selected moving head at the playhead, starting from the pose it's in (K)"
+				>
+					+ Frame
 				</button>
 				<button
 					className="rounded border border-line bg-panel2 px-2 py-1 hover:bg-line"
@@ -508,7 +534,8 @@ export function Timeline(): React.JSX.Element {
 						<div className="sticky left-0 p-4 text-muted">Add a light in the Fixtures tab to get a track.</div>
 					)}
 					{fixtures.map((f) => (
-						<div key={f.id} className="flex" style={{ height: TRACK_H }}>
+						<Fragment key={f.id}>
+						<div className="flex" style={{ height: TRACK_H }}>
 							<div
 								className={`sticky left-0 z-30 flex items-center border-b border-r border-line px-2 ${f.id === selectedId ? "bg-panel2 text-accent" : "bg-panel"}`}
 								style={{ width: LABEL_W, minWidth: LABEL_W }}
@@ -546,6 +573,23 @@ export function Timeline(): React.JSX.Element {
 									))}
 							</div>
 						</div>
+						{motionOf(f) && (
+							<MoveLane
+								fixture={f}
+								allFrames={frames}
+								zoom={zoom}
+								width={contentW}
+								selected={selected}
+								isSelectedFixture={f.id === selectedId}
+								onEmptyPress={(e) =>
+									startMarquee(e, () => {
+										st().selectFixture(f.id)
+										st().setSelection([])
+									})
+								}
+							/>
+						)}
+						</Fragment>
 					))}
 
 					{/* playhead: a grab strip that sits under the clips, and the visible line on top */}
@@ -567,6 +611,89 @@ export function Timeline(): React.JSX.Element {
 				</div>
 			</div>
 		</section>
+	)
+}
+
+const ARRIVAL = { ok: "#4ade80", late: "#fbbf24", missed: "#f87171" } as const
+const arrivalKind = (a: Arrival | undefined): keyof typeof ARRIVAL => (!a ? "ok" : !a.reached ? "missed" : a.late > 0.05 ? "late" : "ok")
+const arrivalText = (a: Arrival | undefined): string =>
+	!a ? "" : !a.reached ? "The head can't reach this pose before the next frame." : a.late > 0.05 ? `The head arrives ${a.late.toFixed(2)} s late (its motors can't go that fast).` : "The head gets here on time."
+
+/**
+ * A moving head's movement lane: its frames (poses) as diamonds, with the move between each pair drawn
+ * as a bar that shows whether the head's motors can make it in time (green on time, amber late, red
+ * never gets there). Drag frames like any other item; double-click empty space to add one.
+ */
+function MoveLane(props: {
+	fixture: Fixture
+	allFrames: PoseFrame[]
+	zoom: number
+	width: number
+	selected: Set<string>
+	isSelectedFixture: boolean
+	onEmptyPress: (e: React.PointerEvent) => void
+}): React.JSX.Element {
+	const { fixture, allFrames, zoom, width, selected, isSelectedFixture, onEmptyPress } = props
+	const st = useStore.getState
+	const mine = allFrames.filter((f) => f.fixtureId === fixture.id).sort((a, b) => a.start - b.start)
+	const report = motionReport(fixture, allFrames)
+	return (
+		<div className="flex" style={{ height: MOVE_H }}>
+			<div
+				className={`sticky left-0 z-30 flex items-center border-b border-r border-line px-2 text-xs ${isSelectedFixture ? "bg-panel2 text-accent" : "bg-panel text-muted"}`}
+				style={{ width: LABEL_W, minWidth: LABEL_W }}
+				onClick={() => st().selectFixture(fixture.id)}
+			>
+				↔ Movement
+			</div>
+			<div
+				className="relative border-b border-line"
+				style={{
+					width,
+					backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px ${zoom}px)`,
+				}}
+				onPointerDown={onEmptyPress}
+				onDoubleClick={(e) => {
+					const left = e.currentTarget.getBoundingClientRect().left
+					st().addFrame(fixture.id, (e.clientX - left) / zoom)
+				}}
+			>
+				{mine.length === 0 && (
+					<span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-xs text-muted">
+						Double-click here (or press K) to add a pose for this head
+					</span>
+				)}
+				{mine.slice(1).map((fr, i) => {
+					const a = mine[i]
+					const kind = arrivalKind(report.get(fr.id))
+					return (
+						<div
+							key={`seg-${fr.id}`}
+							className="pointer-events-none absolute top-1/2 h-1 -translate-y-1/2 rounded"
+							style={{ left: a.start * zoom, width: Math.max(2, (fr.start - a.start) * zoom), background: ARRIVAL[kind], opacity: 0.75 }}
+						/>
+					)
+				})}
+				{mine.map((fr) => {
+					const kind = arrivalKind(report.get(fr.id))
+					return (
+						<div
+							key={fr.id}
+							data-item-id={fr.id}
+							className="absolute top-1/2 z-[1] h-3 w-3 -translate-x-1/2 -translate-y-1/2 rotate-45 cursor-grab"
+							style={{
+								left: fr.start * zoom,
+								background: ARRIVAL[kind],
+								outline: selected.has(fr.id) ? "2px solid #fff" : "1px solid rgba(0,0,0,0.6)",
+							}}
+							title={`Pan ${fr.pan.toFixed(0)}°  Tilt ${fr.tilt.toFixed(0)}°  (${fr.ease})${arrivalText(report.get(fr.id)) ? `\n${arrivalText(report.get(fr.id))}` : ""}`}
+							onPointerDown={(e) => itemPointerDown(e, fr.id)}
+							onDoubleClick={(e) => e.stopPropagation()}
+						/>
+					)
+				})}
+			</div>
+		</div>
 	)
 }
 
@@ -625,39 +752,70 @@ function AccentView({ accent, zoom, selected }: { accent: Accent; zoom: number; 
 	)
 }
 
-/** The reference video's bar: drag it to line the footage up with the song. */
+/**
+ * The reference video's bar. Drag it to move the video along the timeline; drag either edge to trim
+ * (cut the intro or outro, the way a video editor does); hold Alt and drag to slide the video's
+ * content under the bar without moving the bar.
+ */
 function VideoClipView({ reference, zoom }: { reference: Reference; zoom: number }): React.JSX.Element {
 	const st = useStore.getState
+	const w = Math.max(10, reference.length * zoom)
+
 	const move = (e: React.PointerEvent): void => {
+		if (e.button !== 0) return
 		const s0 = reference.start
+		const len = reference.length
+		if (e.altKey) {
+			// slide: the bar stays put, but a different part of the video plays inside it
+			const before = { ...reference }
+			startDrag(e, (dx) => st().updateReference(slipPatch(before, dx / zoom)))
+			return
+		}
 		startDrag(e, (dx) => {
 			const raw = s0 + dx / zoom
 			const a = snapTime(raw, "video")
-			const b = snapTime(raw + reference.duration, "video") - reference.duration
-			const start = Math.abs(a - raw) <= Math.abs(b - raw) ? a : b
-			st().updateReference({ start: Math.max(1 - reference.duration, start) })
+			const b = snapTime(raw + len, "video") - len
+			st().updateReference({ start: Math.max(0, Math.abs(a - raw) <= Math.abs(b - raw) ? a : b) })
 		})
 	}
+	// left edge: cut (or restore) the front. What's under the playhead stays put; only the bar's edge moves.
+	const trimL = (e: React.PointerEvent): void => {
+		const before = { ...reference }
+		startDrag(e, (dx) => st().updateReference(trimStartPatch(before, snapTime(before.start + dx / zoom, "video") - before.start)))
+	}
+	const trimR = (e: React.PointerEvent): void => {
+		const before = { ...reference }
+		const e0 = before.start + before.length
+		startDrag(e, (dx) => st().updateReference(trimEndPatch(before, snapTime(e0 + dx / zoom, "video"))))
+	}
+
+	const trimmed = reference.trimIn > 0.005 || reference.length < reference.duration - 0.005
 	return (
 		<div
 			className="absolute top-1 z-[1] flex cursor-grab items-center overflow-hidden rounded bg-[#3a2766] px-2 text-[11px] text-white active:cursor-grabbing"
 			style={{
 				left: reference.start * zoom,
-				width: reference.duration * zoom,
+				width: w,
 				height: VIDEO_H - 8,
 				outline: "1px solid rgba(181,140,255,0.6)",
 				outlineOffset: -1,
 			}}
-			title="Drag to line the video up with the music"
+			title="Drag to move · drag an edge to trim · Alt+drag to slide the video under the bar"
 			onPointerDown={move}
 		>
-			<span className="truncate">{reference.name}</span>
+			<span className="pointer-events-none truncate">
+				{reference.name}
+				{trimmed && ` · ${fmt(reference.trimIn)}–${fmt(reference.trimIn + reference.length)}`}
+			</span>
+			<div className="absolute inset-y-0 left-0 w-1.5 cursor-col-resize bg-[#b58cff]/40" onPointerDown={trimL} />
+			<div className="absolute inset-y-0 right-0 w-1.5 cursor-col-resize bg-[#b58cff]/40" onPointerDown={trimR} />
 		</div>
 	)
 }
 
 /** One tile of an audio clip's waveform. */
-function WaveTile({ path, zoom, x0, width }: { path: string; zoom: number; x0: number; width: number }): React.JSX.Element {
+function WaveTile(props: { path: string; zoom: number; x0: number; width: number; offset: number }): React.JSX.Element {
+	const { path, zoom, x0, width, offset } = props
 	const ref = useRef<HTMLCanvasElement>(null)
 	useEffect(() => {
 		const canvas = ref.current
@@ -666,14 +824,15 @@ function WaveTile({ path, zoom, x0, width }: { path: string; zoom: number; x0: n
 		if (!canvas || !loaded || !ctx) return
 		const { peaks, bucket, buffer } = loaded
 		const perPx = (buffer.sampleRate / bucket) / zoom // buckets per pixel
+		const first = offset * (buffer.sampleRate / bucket) // bucket where this clip begins in the file
 		const buckets = peaks.length / 2
 		const mid = AUDIO_CLIP_H / 2
 		const amp = mid - 3
 		ctx.clearRect(0, 0, width, AUDIO_CLIP_H)
 		ctx.fillStyle = "#4da3ff"
 		for (let i = 0; i < width; i++) {
-			const b0 = Math.floor((x0 + i) * perPx)
-			const b1 = Math.max(b0 + 1, Math.ceil((x0 + i + 1) * perPx))
+			const b0 = Math.floor(first + (x0 + i) * perPx)
+			const b1 = Math.max(b0 + 1, Math.ceil(first + (x0 + i + 1) * perPx))
 			let lo = 0
 			let hi = 0
 			for (let b = b0; b < b1 && b < buckets; b++) {
@@ -683,7 +842,7 @@ function WaveTile({ path, zoom, x0, width }: { path: string; zoom: number; x0: n
 			const y1 = mid - hi * amp
 			ctx.fillRect(i, y1, 1, Math.max(1, mid - lo * amp - y1))
 		}
-	}, [path, zoom, x0, width])
+	}, [path, zoom, x0, width, offset])
 	return <canvas ref={ref} width={width} height={AUDIO_CLIP_H} className="pointer-events-none absolute top-0" style={{ left: x0 }} />
 }
 
@@ -709,11 +868,13 @@ function AudioClipView({ clip, zoom, selected }: { clip: AudioClip; zoom: number
 		>
 			{status === "ready" &&
 				Array.from({ length: tiles }, (_, k) => (
-					<WaveTile key={k} path={clip.path} zoom={zoom} x0={k * TILE_W} width={Math.min(TILE_W, w - k * TILE_W)} />
+					<WaveTile key={k} path={clip.path} zoom={zoom} x0={k * TILE_W} width={Math.min(TILE_W, w - k * TILE_W)} offset={clip.offset ?? 0} />
 				))}
-			{clip.beats?.map((b, i) => (
-				<div key={i} className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/30" style={{ left: b * zoom }} />
-			))}
+			{clip.beats?.map((b, i) => {
+				const at = b - (clip.offset ?? 0)
+				if (at < 0 || at > clip.duration) return null
+				return <div key={i} className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/30" style={{ left: at * zoom }} />
+			})}
 			<span className="pointer-events-none absolute top-0.5 left-2 text-[10px] font-medium text-white [text-shadow:0_0_3px_#000]">
 				{status === "loading" && "Loading… "}
 				{status === "missing" && "File missing — "}

@@ -1,6 +1,8 @@
 import type { Curve } from "../lib/show"
 
-import { profileById } from "../lib/profiles"
+import { type Arrival, motionOf, motionReport } from "../lib/motion"
+import { type MotionSpec, profileById } from "../lib/profiles"
+import { DEG, type Vec3, defaultTransform, fixtureTransform } from "../lib/stage"
 import { useStore } from "../lib/store"
 
 const hex = (n: number): string => Math.round(n).toString(16).padStart(2, "0")
@@ -142,6 +144,156 @@ function AccentPanel({ id }: { id: string }): React.JSX.Element | null {
 	)
 }
 
+/**
+ * Three number boxes (x, y, z). Typing commits when you leave the box or press Enter, so half-typed
+ * values like "-" never reach the scene; the boxes refresh when the gizmo moves the light.
+ */
+function VecRow(props: { label: string; value: Vec3; scale?: number; step: number; onCommit: (v: Vec3) => void }): React.JSX.Element {
+	const { label, value, scale = 1, step, onCommit } = props
+	return (
+		<div className="flex items-center gap-1">
+			<span className="w-14 shrink-0 text-muted">{label}</span>
+			{(["x", "y", "z"] as const).map((axis, i) => (
+				<input
+					key={`${axis}-${value[i]}`}
+					type="number"
+					step={step}
+					title={axis.toUpperCase()}
+					className="w-full min-w-0 rounded border border-line bg-panel2 px-1.5 py-1"
+					defaultValue={Number((value[i] * scale).toFixed(2))}
+					onBlur={(e) => {
+						const n = Number.parseFloat(e.target.value)
+						if (!Number.isFinite(n)) return
+						const next = value.slice() as Vec3
+						next[i] = n / scale
+						onCommit(next)
+					}}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") e.currentTarget.blur()
+					}}
+				/>
+			))}
+		</div>
+	)
+}
+
+/** One pose of a moving head: where it should point, how it gets there, and whether its motors can manage it. */
+function FramePanel({ id }: { id: string }): React.JSX.Element | null {
+	const frame = useStore((s) => s.frames.find((f) => f.id === id))
+	const fixture = useStore((s) => s.fixtures.find((f) => f.id === frame?.fixtureId))
+	const arrival: Arrival | undefined = useStore((s) => (frame && fixture ? motionReport(fixture, s.frames).get(frame.id) : undefined))
+	const update = useStore((s) => s.updateFrame)
+	const spec = fixture ? motionOf(fixture) : null
+	if (!frame || !fixture || !spec) return null
+
+	const verdict = !arrival
+		? null
+		: !arrival.reached
+			? { tone: "text-red-400", text: "The head can't reach this pose before the next frame starts. Move the frames apart, or make the move smaller." }
+			: arrival.late > 0.05
+				? { tone: "text-amber-300", text: `The head arrives ${arrival.late.toFixed(2)} s late: its motors can't turn that fast. Give this move more time, or turn it less.` }
+				: { tone: "text-green-400", text: "The head gets here on time." }
+
+	return (
+		<section className="space-y-3 rounded border border-[#4ade80]/50 bg-panel2 p-2">
+			<h4 className="text-xs uppercase tracking-wider text-[#4ade80]">Movement frame · {fixture.name}</h4>
+			<Slider
+				label="Pan (turn)"
+				value={Math.round(frame.pan)}
+				min={-spec.panRange / 2}
+				max={spec.panRange / 2}
+				unit="°"
+				onChange={(v) => update(id, { pan: v })}
+			/>
+			<Slider
+				label="Tilt (nod)"
+				value={Math.round(frame.tilt)}
+				min={-spec.tiltRange / 2}
+				max={spec.tiltRange / 2}
+				unit="°"
+				onChange={(v) => update(id, { tilt: v })}
+			/>
+			<label className="flex items-center justify-between">
+				<span title="How the head travels INTO this pose from the one before">Move in</span>
+				<select
+					className="rounded border border-line bg-panel px-2 py-1"
+					value={frame.ease}
+					onChange={(e) => update(id, { ease: e.target.value as "smooth" | "linear" | "hold" })}
+				>
+					<option value="smooth">Smooth (eases in and out)</option>
+					<option value="linear">Linear (steady speed)</option>
+					<option value="hold">Snap (waits, then goes at full speed)</option>
+				</select>
+			</label>
+			<label className="flex items-center justify-between">
+				<span>At time (s)</span>
+				<input
+					key={frame.start}
+					type="number"
+					step={0.1}
+					min={0}
+					className="w-24 rounded border border-line bg-panel px-2 py-1"
+					defaultValue={Number(frame.start.toFixed(2))}
+					onBlur={(e) => {
+						const n = Number.parseFloat(e.target.value)
+						if (Number.isFinite(n)) update(id, { start: n })
+					}}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") e.currentTarget.blur()
+					}}
+				/>
+			</label>
+			{verdict && <p className={verdict.tone}>{verdict.text}</p>}
+			<p className="text-muted">The preview and the real head move at the speed its motors allow, so a fast move shows as the head lagging behind.</p>
+		</section>
+	)
+}
+
+const MOTION_FIELDS: { key: keyof MotionSpec; label: string; unit: string; min: number; max: number; step: number }[] = [
+	{ key: "panSpeed", label: "Pan speed", unit: "°/s", min: 20, max: 720, step: 5 },
+	{ key: "tiltSpeed", label: "Tilt speed", unit: "°/s", min: 20, max: 720, step: 5 },
+	{ key: "accel", label: "Acceleration", unit: "°/s²", min: 100, max: 4000, step: 50 },
+	{ key: "panRange", label: "Pan range", unit: "°", min: 90, max: 720, step: 10 },
+	{ key: "tiltRange", label: "Tilt range", unit: "°", min: 90, max: 360, step: 10 },
+]
+
+/** A moving head's motors. The defaults are typical; set them to match your real fixture so the preview and warnings are honest. */
+function MotionPanel({ id }: { id: string }): React.JSX.Element | null {
+	const fixture = useStore((s) => s.fixtures.find((f) => f.id === id))
+	const setMotion = useStore((s) => s.setMotion)
+	const spec = fixture ? motionOf(fixture) : null
+	if (!fixture || !spec) return null
+	return (
+		<section className="space-y-3 rounded border border-line bg-panel2 p-2">
+			<div className="flex items-center justify-between">
+				<h4 className="text-xs uppercase tracking-wider text-muted">Motors</h4>
+				<button
+					className="rounded border border-line px-2 py-0.5 text-xs hover:bg-line"
+					title="Back to this fixture type's typical values"
+					onClick={() => setMotion(id, null)}
+				>
+					Reset
+				</button>
+			</div>
+			{MOTION_FIELDS.map((m) => (
+				<Slider
+					key={m.key}
+					label={m.label}
+					value={spec[m.key]}
+					min={m.min}
+					max={m.max}
+					step={m.step}
+					unit={m.unit}
+					onChange={(v) => setMotion(id, { [m.key]: v })}
+				/>
+			))}
+			<p className="text-muted">
+				To match a real head, time one full pan from end to end: speed = range ÷ seconds. Frames the motors can't reach in time are flagged on the timeline.
+			</p>
+		</section>
+	)
+}
+
 /** Shown when several timeline items are selected at once. */
 function MultiPanel({ count }: { count: number }): React.JSX.Element {
 	const deleteSelection = useStore((s) => s.deleteSelection)
@@ -166,12 +318,19 @@ export function Inspector(): React.JSX.Element {
 	const fixture = useStore((s) => s.fixtures.find((f) => f.id === s.selectedId))
 	const clip = useStore((s) => s.clips.find((c) => c.id === s.selectedClipId))
 	const driven = useStore((s) => s.mode === "timeline" && s.clips.some((c) => c.fixtureId === s.selectedId))
+	const drivenMotion = useStore((s) => s.mode === "timeline" && s.frames.some((f) => f.fixtureId === s.selectedId))
+	const selectedFrameId = useStore((s) => s.selectedFrameId)
 	const setValue = useStore((s) => s.setValue)
 	const setRgb = useStore((s) => s.setRgb)
 	const setAddress = useStore((s) => s.setAddress)
 	const rename = useStore((s) => s.renameFixture)
 	const updateClip = useStore((s) => s.updateClip)
 	const removeClip = useStore((s) => s.removeClip)
+	const stageView = useStore((s) => s.stageView)
+	const fixtureIndex = useStore((s) => s.fixtures.findIndex((f) => f.id === s.selectedId))
+	const fixtureCount = useStore((s) => s.fixtures.length)
+	const setTransform = useStore((s) => s.setFixtureTransform)
+	useStore((s) => s.stageStatus) // a loaded stage changes each light's default spot, so redraw when it does
 
 	if (!fixture) {
 		return (
@@ -195,7 +354,8 @@ export function Inspector(): React.JSX.Element {
 		? toHex(fixture.values[idx("red")], fixture.values[idx("green")], fixture.values[idx("blue")])
 		: "#ffffff"
 	const timelineOwns = (kind: string): boolean =>
-		driven && (kind === "dimmer" || kind === "red" || kind === "green" || kind === "blue")
+		(driven && (kind === "dimmer" || kind === "red" || kind === "green" || kind === "blue")) ||
+		(drivenMotion && (kind === "pan" || kind === "panFine" || kind === "tilt" || kind === "tiltFine"))
 
 	return (
 		<aside className="min-h-0 space-y-4 overflow-y-auto bg-panel p-3">
@@ -203,6 +363,7 @@ export function Inspector(): React.JSX.Element {
 
 			{selectionCount > 1 && <MultiPanel count={selectionCount} />}
 			{selectedAccentId && <AccentPanel id={selectedAccentId} />}
+			{selectedFrameId && <FramePanel id={selectedFrameId} />}
 
 			{clip && (
 				<section className="space-y-3 rounded border border-accent/50 bg-panel2 p-2">
@@ -286,6 +447,41 @@ export function Inspector(): React.JSX.Element {
 					onChange={(e) => setAddress(fixture.id, Number(e.target.value))}
 				/>
 			</label>
+
+			{motionOf(fixture) && <MotionPanel id={fixture.id} />}
+			{drivenMotion && (
+				<p className="rounded border border-line bg-panel2 p-2 text-muted">
+					This head has movement frames, so the timeline controls where it points. Its brightness and colour are separate.
+				</p>
+			)}
+
+			{stageView === "3d" && (
+				<section className="space-y-2 rounded border border-line bg-panel2 p-2">
+					<div className="flex items-center justify-between">
+						<h4 className="text-xs uppercase tracking-wider text-muted">3D position</h4>
+						<button
+							className="rounded border border-line px-2 py-0.5 text-xs hover:bg-line"
+							title="Put this light back in its starting spot on the truss"
+							onClick={() => {
+								const d = defaultTransform(fixtureIndex, fixtureCount)
+								setTransform(fixture.id, d.pos, d.rot)
+							}}
+						>
+							Reset
+						</button>
+					</div>
+					{(() => {
+						const t = fixtureTransform(fixture, fixtureIndex, fixtureCount)
+						return (
+							<>
+								<VecRow label="Move (m)" value={t.pos} step={0.1} onCommit={(pos) => setTransform(fixture.id, pos, t.rot)} />
+								<VecRow label="Turn (°)" value={t.rot} scale={DEG} step={5} onCommit={(rot) => setTransform(fixture.id, t.pos, rot)} />
+							</>
+						)
+					})()}
+					<p className="text-muted">Or click the light in the 3D view and drag its arrows (W move, E rotate).</p>
+				</section>
+			)}
 
 			{driven && (
 				<p className="rounded border border-line bg-panel2 p-2 text-muted">

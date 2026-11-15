@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 
+import { videoTimeAt } from "../lib/show"
 import { lightTime, useStore } from "../lib/store"
 
 /**
@@ -39,18 +40,16 @@ export function ReferencePanel(): React.JSX.Element | null {
 			if (!r) return
 			v.muted = r.muted
 			// the picture tracks what's being HEARD, so it lines up with the lights as well
-			const target = lightTime(s) - r.start
-			const len = Number.isFinite(v.duration) ? v.duration : r.duration
-			if (s.playing && target >= 0 && target < len) {
+			const { inside, at } = videoTimeAt(r, lightTime(s), Number.isFinite(v.duration) ? v.duration : r.duration)
+			if (s.playing && inside) {
 				if (v.paused) void v.play().catch(() => {})
-				const diff = target - v.currentTime
-				if (Math.abs(diff) > 0.3) v.currentTime = target
+				const diff = at - v.currentTime
+				if (Math.abs(diff) > 0.3) v.currentTime = at
 				else v.playbackRate = 1 + Math.max(-0.03, Math.min(0.03, diff * 0.25))
 			} else {
 				if (!v.paused) v.pause()
 				v.playbackRate = 1
-				const shown = Math.min(Math.max(target, 0), len)
-				if (Math.abs(v.currentTime - shown) > 0.04) v.currentTime = shown
+				if (Math.abs(v.currentTime - at) > 0.04) v.currentTime = at
 			}
 		}
 		// a timer, not rAF, so the video keeps following when the window is behind another one

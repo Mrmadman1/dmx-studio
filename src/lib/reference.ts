@@ -29,6 +29,8 @@ export async function loadReferenceFromPath(path: string, start: number): Promis
 			name: baseName(path),
 			start: Math.max(0, start),
 			duration,
+			trimIn: 0,
+			length: duration,
 			muted: false,
 			visible: true,
 		})
@@ -47,7 +49,9 @@ export async function addReferenceAudio(): Promise<boolean> {
 	const s = useStore.getState()
 	const ref = s.reference
 	if (!ref) return false
-	const existing = s.audioClips.find((a) => a.path === ref.path)
+	const existing = s.audioClips.find(
+		(a) => a.path === ref.path && Math.abs(a.start - ref.start) < 1e-6 && Math.abs((a.offset ?? 0) - ref.trimIn) < 1e-6,
+	)
 	if (existing) {
 		s.selectAudio(existing.id)
 		s.updateReference({ muted: true })
@@ -59,7 +63,9 @@ export async function addReferenceAudio(): Promise<boolean> {
 		return false
 	}
 	const st = useStore.getState()
-	st.addAudioClip({ path: ref.path, name: `${ref.name} (sound)`, start: ref.start, duration: loaded.buffer.duration })
+	// the sound covers exactly the part of the video we use, so the two stay lined up
+	const duration = Math.min(ref.length, loaded.buffer.duration - ref.trimIn)
+	st.addAudioClip({ path: ref.path, name: `${ref.name} (sound)`, start: ref.start, duration, offset: ref.trimIn })
 	st.updateReference({ muted: true })
 	return true
 }

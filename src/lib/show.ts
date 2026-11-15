@@ -1,5 +1,6 @@
 import type { Fixture } from "./store"
 
+import { type Pose, applyPose, motionOf } from "./motion"
 import { profileById } from "./profiles"
 
 export type Curve = "linear" | "smooth"
@@ -78,6 +79,40 @@ export function projectEnd(clips: Clip[]): number {
 	return clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0)
 }
 
+/** The part of a video that plays on the timeline: `length` seconds from `trimIn` of a `duration`-long file, starting at `start`. */
+export interface VideoSpan {
+	start: number
+	duration: number
+	trimIn: number
+	length: number
+}
+
+/** Where in the video file the picture should be at timeline time t, and whether t is inside the bar (so it should be playing). */
+export function videoTimeAt(r: VideoSpan, t: number, fileLength: number = r.duration): { inside: boolean; at: number } {
+	const rel = t - r.start
+	const inside = rel >= 0 && rel < r.length
+	const last = Math.min(r.trimIn + r.length, fileLength)
+	// outside the bar the video rests on its first or last frame of the used part
+	return { inside, at: inside ? r.trimIn + rel : Math.min(Math.max(r.trimIn + rel, r.trimIn), last) }
+}
+
+/** Drag the bar's LEFT edge by `delta` seconds: cut (or restore) footage from the front while everything after stays put. */
+export function trimStartPatch(r: VideoSpan, delta: number): Pick<VideoSpan, "start" | "trimIn" | "length"> {
+	// can't restore footage from before the video's first frame, nor drag the bar before 0:00 on the timeline, nor trim it away entirely
+	const d = Math.min(Math.max(delta, -Math.min(r.trimIn, r.start)), r.length - MIN_CLIP)
+	return { start: r.start + d, trimIn: r.trimIn + d, length: r.length - d }
+}
+
+/** Drag the bar's RIGHT edge to timeline time `end`: cut (or restore) footage from the back. */
+export function trimEndPatch(r: VideoSpan, end: number): Pick<VideoSpan, "length"> {
+	return { length: Math.min(Math.max(end - r.start, MIN_CLIP), r.duration - r.trimIn) }
+}
+
+/** Slide the video's content under a fixed bar: dragging right by `shift` seconds shows earlier footage. */
+export function slipPatch(r: VideoSpan, shift: number): Pick<VideoSpan, "trimIn"> {
+	return { trimIn: Math.min(Math.max(r.trimIn - shift, 0), r.duration - r.length) }
+}
+
 /** End of the whole show: the last light clip or the last audio clip, whichever is later. */
 export function showEnd(clips: Clip[], audio: { start: number; duration: number }[]): number {
 	return audio.reduce((m, a) => Math.max(m, a.start + a.duration), projectEnd(clips))
@@ -89,7 +124,14 @@ export function showEnd(clips: Clip[], audio: { start: number; duration: number 
  * (black between clips) and the rest (strobe, macro, speed) stay on the faders. Accents only
  * brighten lights that have clips.
  */
-export function effectiveValues(f: Fixture, clips: Clip[], t: number, accents: Accent[] = []): number[] {
+export function effectiveValues(f: Fixture, clips: Clip[], t: number, accents: Accent[] = [], pose: Pose | null = null): number[] {
+	const base = colourValues(f, clips, t, accents)
+	// a moving head with frames: the timeline owns where it points as well
+	const spec = pose ? motionOf(f) : null
+	return pose && spec ? applyPose(base, f.profileId, pose, spec) : base
+}
+
+function colourValues(f: Fixture, clips: Clip[], t: number, accents: Accent[]): number[] {
 	const own = clips.filter((c) => c.fixtureId === f.id)
 	if (own.length === 0) return f.values
 	const active = own.find((c) => t >= c.start && t < c.start + c.duration)

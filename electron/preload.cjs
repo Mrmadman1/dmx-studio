@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("studio", {
 	openAudio: () => ipcRenderer.invoke("dialog:openAudio"),
 	openVideo: () => ipcRenderer.invoke("dialog:openVideo"),
 	mediaUrl: (path) => ipcRenderer.invoke("media:url", path),
+	demoStageUrl: () => ipcRenderer.invoke("stage:demoUrl"),
 	loadAutosave: () => ipcRenderer.invoke("project:loadAutosave"),
 	autosave: (json) => ipcRenderer.send("project:autosave", json),
 	saveProject: (json) => ipcRenderer.invoke("project:saveAs", json),

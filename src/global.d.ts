@@ -24,6 +24,8 @@ export interface StudioApi {
 	openVideo: () => Promise<string | null>
 	/** a localhost URL to stream a picked audio/video file from, or null if it's missing */
 	mediaUrl: (path: string) => Promise<string | null>
+	/** a localhost URL for the demo stage model that ships with the app */
+	demoStageUrl: () => Promise<string | null>
 	loadAutosave: () => Promise<string | null>
 	autosave: (json: string) => void
 	saveProject: (json: string) => Promise<string | null>

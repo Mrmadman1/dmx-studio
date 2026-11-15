@@ -21,6 +21,9 @@ const MIME = {
 	m4a: "audio/mp4",
 	aac: "audio/aac",
 	opus: "audio/ogg",
+	fbx: "application/octet-stream",
+	glb: "model/gltf-binary",
+	gltf: "model/gltf+json",
 }
 const MEDIA_EXT = /\.([a-z0-9]+)$/i
 

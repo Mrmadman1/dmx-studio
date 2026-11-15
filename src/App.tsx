@@ -4,13 +4,13 @@ import { AssetDrawer } from "./components/AssetDrawer"
 import { CuePanel } from "./components/CuePanel"
 import { Inspector } from "./components/Inspector"
 import { ReferencePanel } from "./components/ReferencePanel"
-import { StagePreview } from "./components/StagePreview"
+import { Stage } from "./components/Stage"
 import { Timeline } from "./components/Timeline"
 import { TopBar } from "./components/TopBar"
 import { audioNow, deviceLatency, startPlayback, stopPlayback } from "./lib/audio"
 import { usePersistence } from "./lib/project"
 import { showEnd } from "./lib/show"
-import { buildUniverse, lightTime, mediaSpans, useStore } from "./lib/store"
+import { buildTestUniverse, buildUniverse, lightTime, mediaSpans, useStore } from "./lib/store"
 
 /** Push the universe to the DMX engine on every change (no rAF: it must keep going in the background). */
 function useDmxOutput(): void {
@@ -18,12 +18,17 @@ function useDmxOutput(): void {
 		const push = (): void => {
 			const s = useStore.getState()
 			// the timeline's clips only drive the lights in timeline mode; cue mode writes values directly
+			if (s.testLights && !s.blackout) {
+				window.dmx?.sendFrame(buildTestUniverse(s.fixtures))
+				return
+			}
 			const inTimeline = s.mode === "timeline"
 			window.dmx?.sendFrame(
 				buildUniverse(
 					s.fixtures,
 					inTimeline ? s.clips : [],
 					inTimeline ? s.accents : [],
+					inTimeline ? s.frames : [],
 					lightTime(s),
 					s.blackout,
 				),
@@ -130,6 +135,9 @@ function useShortcuts(): void {
 				s.deleteSelection()
 			} else if (e.key === "Escape") {
 				s.setSelection([])
+			} else if (e.key === "k" || e.key === "K") {
+				// a movement frame for the selected moving head, at the pose it's in right now
+				if (s.selectedId) s.addFrame(s.selectedId, Math.max(0, lightTime(s)))
 			} else if (e.key === "a" || e.key === "A") {
 				// tap A on a hit while the song plays: it lands where you HEARD it (lightTime), not where the audio is scheduled
 				s.addAccent(Math.max(0, lightTime(s)))
@@ -155,7 +163,7 @@ function Center(): React.JSX.Element {
 	return (
 		<div className="@container flex min-h-0 min-w-0 flex-col gap-px bg-line @3xl:flex-row">
 			{showVideo && <ReferencePanel />}
-			<StagePreview />
+			<Stage />
 		</div>
 	)
 }

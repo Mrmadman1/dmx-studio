@@ -1,4 +1,25 @@
-export type ChannelKind = "dimmer" | "red" | "green" | "blue" | "strobe" | "macro" | "speed" | "other"
+export type ChannelKind =
+	| "dimmer"
+	| "red"
+	| "green"
+	| "blue"
+	| "strobe"
+	| "macro"
+	| "speed"
+	| "pan"
+	| "panFine"
+	| "tilt"
+	| "tiltFine"
+	| "other"
+
+/** The motors in a moving head: how far it can turn, and how fast (degrees, degrees/s, degrees/s²). */
+export interface MotionSpec {
+	panRange: number
+	tiltRange: number
+	panSpeed: number
+	tiltSpeed: number
+	accel: number
+}
 
 export interface ChannelDef {
 	name: string
@@ -11,6 +32,8 @@ export interface Profile {
 	id: string
 	name: string
 	channels: ChannelDef[]
+	/** present for moving heads: the physical limits of their pan/tilt motors */
+	motion?: MotionSpec
 }
 
 export const PROFILES: Profile[] = [
@@ -44,6 +67,30 @@ export const PROFILES: Profile[] = [
 			{ name: "Red", kind: "red", default: 255 },
 			{ name: "Green", kind: "green", default: 255 },
 			{ name: "Blue", kind: "blue", default: 255 },
+		],
+	},
+	{
+		// A typical 16-channel LED moving head. Pan and tilt are 16-bit (coarse + fine) and centre at 128/0.
+		id: "head16",
+		name: "Generic Moving Head (16ch)",
+		motion: { panRange: 540, tiltRange: 270, panSpeed: 180, tiltSpeed: 140, accel: 700 },
+		channels: [
+			{ name: "Pan", kind: "pan", default: 128 },
+			{ name: "Pan fine", kind: "panFine", default: 0 },
+			{ name: "Tilt", kind: "tilt", default: 128 },
+			{ name: "Tilt fine", kind: "tiltFine", default: 0 },
+			{ name: "Pan/tilt speed", kind: "speed", default: 0 },
+			{ name: "Dimmer", kind: "dimmer", default: 255 },
+			{ name: "Strobe", kind: "strobe", default: 0 },
+			{ name: "Red", kind: "red", default: 255 },
+			{ name: "Green", kind: "green", default: 255 },
+			{ name: "Blue", kind: "blue", default: 255 },
+			{ name: "White", kind: "other", default: 0 },
+			{ name: "Colour macro", kind: "macro", default: 0 },
+			{ name: "Gobo", kind: "other", default: 0 },
+			{ name: "Gobo rotation", kind: "other", default: 0 },
+			{ name: "Focus", kind: "other", default: 0 },
+			{ name: "Control", kind: "other", default: 0 },
 		],
 	},
 	{
