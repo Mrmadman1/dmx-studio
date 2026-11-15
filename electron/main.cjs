@@ -5,6 +5,12 @@ const { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } = require("elect
 const { DmxEngine } = require("./dmx.cjs")
 const { createMediaServer } = require("./media-server.cjs")
 
+// An installed or unzipped build keeps your shows in one fixed folder, whatever the package name says.
+// (Development runs are left alone so they keep using their own autosave.)
+if (app.isPackaged && !app.commandLine.hasSwitch("user-data-dir")) {
+	app.setPath("userData", path.join(app.getPath("appData"), "DMX Studio"))
+}
+
 // A light show has to keep running when the window is behind another app or minimised.
 // Chromium and Windows both throttle timers and lower the priority of background windows,
 // which stretched the DMX frame gaps and made the light flicker.
