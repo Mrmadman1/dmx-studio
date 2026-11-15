@@ -23,6 +23,8 @@ export function toProject(): ProjectData {
 		stageView: s.stageView,
 		stage: s.stage,
 		frames: s.frames,
+		customEffects: s.customEffects,
+		effectRuns: s.effectRuns,
 	}
 }
 
@@ -87,7 +89,9 @@ export function usePersistence(): void {
 					s.accents !== prev.accents ||
 					s.stageView !== prev.stageView ||
 					s.stage !== prev.stage ||
-					s.frames !== prev.frames
+					s.frames !== prev.frames ||
+					s.customEffects !== prev.customEffects ||
+					s.effectRuns !== prev.effectRuns
 				if (!changed) return
 				clearTimeout(timer)
 				timer = setTimeout(flush, 800)

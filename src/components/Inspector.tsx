@@ -380,6 +380,28 @@ export function Inspector(): React.JSX.Element {
 							}}
 						/>
 					</label>
+					<label className="flex items-center justify-between">
+						<span title="Glide from the colour above to another one over the length of the clip">Fade to another colour</span>
+						<input
+							type="checkbox"
+							checked={!!clip.to}
+							onChange={(e) => updateClip(clip.id, { to: e.target.checked ? [clip.r, clip.g, clip.b] : undefined })}
+						/>
+					</label>
+					{clip.to && (
+						<label className="flex items-center justify-between">
+							<span>End colour</span>
+							<input
+								type="color"
+								className="h-8 w-20 cursor-pointer border border-line bg-transparent"
+								value={toHex(clip.to[0], clip.to[1], clip.to[2])}
+								onChange={(e) => {
+									const [r, g, b] = parseHex(e.target.value)
+									updateClip(clip.id, { to: [r, g, b] })
+								}}
+							/>
+						</label>
+					)}
 					<Slider
 						label="Brightness"
 						value={Math.round(clip.intensity * 100)}

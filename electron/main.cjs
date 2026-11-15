@@ -70,6 +70,29 @@ ipcMain.handle("dialog:openAudio", async () => {
 	return r.canceled ? [] : r.filePaths
 })
 
+// Effect packs are small JSON files; the page reads and validates them, we just fetch and write the text.
+ipcMain.handle("dialog:openText", async () => {
+	const r = await dialog.showOpenDialog(win, {
+		properties: ["openFile"],
+		filters: [{ name: "Effect pack", extensions: ["json", "dmxfx"] }],
+	})
+	if (r.canceled || !r.filePaths[0]) return null
+	try {
+		const stat = await fs.stat(r.filePaths[0])
+		if (stat.size > 2 * 1024 * 1024) return { error: "That file is too big to be an effect pack (over 2 MB)." }
+		return { text: await fs.readFile(r.filePaths[0], "utf8") }
+	} catch {
+		return { error: "Couldn't read that file." }
+	}
+})
+ipcMain.handle("dialog:saveText", async (_e, defaultName, text) => {
+	const name = typeof defaultName === "string" ? defaultName.replace(/[\\/:*?"<>|]/g, "-") : "effects.json"
+	const r = await dialog.showSaveDialog(win, { defaultPath: name, filters: [{ name: "Effect pack", extensions: ["json"] }] })
+	if (r.canceled || !r.filePath) return null
+	await fs.writeFile(r.filePath, String(text))
+	return r.filePath
+})
+
 ipcMain.handle("dialog:openVideo", async () => {
 	const r = await dialog.showOpenDialog(win, {
 		properties: ["openFile"],

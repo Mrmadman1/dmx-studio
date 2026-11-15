@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("studio", {
 	pathForFile: (file) => webUtils.getPathForFile(file),
 	openAudio: () => ipcRenderer.invoke("dialog:openAudio"),
 	openVideo: () => ipcRenderer.invoke("dialog:openVideo"),
+	openText: () => ipcRenderer.invoke("dialog:openText"),
+	saveText: (defaultName, text) => ipcRenderer.invoke("dialog:saveText", defaultName, text),
 	mediaUrl: (path) => ipcRenderer.invoke("media:url", path),
 	demoStageUrl: () => ipcRenderer.invoke("stage:demoUrl"),
 	loadAutosave: () => ipcRenderer.invoke("project:loadAutosave"),

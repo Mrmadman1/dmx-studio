@@ -928,7 +928,9 @@ function ClipView({
 				left: clip.start * zoom,
 				width: w,
 				height: CLIP_H,
-				background: `rgb(${clip.r},${clip.g},${clip.b})`,
+				background: clip.to
+					? `linear-gradient(90deg, rgb(${clip.r},${clip.g},${clip.b}), rgb(${clip.to.join(",")}))`
+					: `rgb(${clip.r},${clip.g},${clip.b})`,
 				outline: selected ? "2px solid #fff" : "1px solid rgba(0,0,0,0.45)",
 				outlineOffset: -1,
 			}}

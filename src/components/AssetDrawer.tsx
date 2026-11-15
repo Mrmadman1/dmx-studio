@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { EffectsTab } from "./EffectsTab"
 
 import { addAudioFromPath, loadAudio, pickAudioFiles } from "../lib/audio"
 import { detectBeats } from "../lib/beats"
@@ -32,6 +33,8 @@ export function AssetDrawer(): React.JSX.Element {
 					<AudioTab />
 				) : tab === "Reference" ? (
 					<ReferenceTab />
+				) : tab === "Effects" ? (
+					<EffectsTab />
 				) : (
 					<p className="text-muted">{tab} is coming in a later phase.</p>
 				)}

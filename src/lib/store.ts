@@ -1,8 +1,9 @@
 import { create } from "zustand"
 
+import { BUILTIN_EFFECTS, type EffectDef, ENGINES, audioBeatTimes, carveClips, generateEffect, normalizeEffect } from "./effects"
 import { type PoseFrame, cleanMotion, currentPose, motionOf, poseAt, validFrames } from "./motion"
 import { type MotionSpec, profileById } from "./profiles"
-import { type Accent, type Clip, MIN_CLIP, effectiveValues, showEnd } from "./show"
+import { type Accent, type Clip, MIN_CLIP, clipColor, effectiveValues, showEnd } from "./show"
 import { type Vec3, cleanVec3 } from "./stage"
 
 export interface Fixture {
@@ -54,6 +55,28 @@ export interface Clipboard {
 	frames: PoseFrame[]
 	/** each copied clip's track position (index into the lights list) when it was copied, so a paste can keep the layout */
 	trackOf: Record<string, number>
+}
+
+/** One time an effect was added to the timeline: what it was, where it went, so it can be taken out again. */
+export interface EffectRun {
+	id: string
+	name: string
+	start: number
+	end: number
+	fixtureIds: string[]
+	clips: number
+	frames: number
+}
+
+function validRuns(list: unknown): EffectRun[] {
+	if (!Array.isArray(list)) return []
+	return list.slice(0, 200).flatMap((raw: unknown): EffectRun[] => {
+		if (!raw || typeof raw !== "object") return []
+		const r = raw as Partial<EffectRun>
+		if (typeof r.id !== "string" || typeof r.name !== "string" || !Number.isFinite(r.start) || !Number.isFinite(r.end)) return []
+		const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.round(v)) : 0)
+		return [{ id: r.id, name: r.name.slice(0, 60), start: r.start as number, end: r.end as number, fixtureIds: Array.isArray(r.fixtureIds) ? r.fixtureIds.filter((x): x is string => typeof x === "string") : [], clips: n(r.clips), frames: n(r.frames) }]
+	})
 }
 
 /** A video to copy the lighting from (concert footage). It plays in step with the timeline. */
@@ -136,6 +159,8 @@ export interface ProjectData {
 	stageView: "2d" | "3d"
 	stage: "demo" | null
 	frames: PoseFrame[]
+	customEffects: EffectDef[]
+	effectRuns: EffectRun[]
 }
 
 type Looks = Record<string, number[]>
@@ -177,6 +202,10 @@ interface State {
 	/** moving-head poses over time: where each head should be (the motors then get there as fast as they can) */
 	frames: PoseFrame[]
 	selectedFrameId: string | null
+	/** effects imported from packs (the built-in ones always exist; these travel with the show) */
+	customEffects: EffectDef[]
+	/** every effect added to the timeline, so each can be removed again */
+	effectRuns: EffectRun[]
 
 	clips: Clip[]
 	selectedClipId: string | null
@@ -243,6 +272,16 @@ interface State {
 	selectAccent: (id: string | null) => void
 	updateAccent: (id: string, patch: Partial<Omit<Accent, "id">>) => void
 
+	/** write an effect onto the timeline; `replace` clears whatever is already there on those lights first */
+	applyEffect: (
+		def: EffectDef,
+		values: Record<string, unknown>,
+		opts: { start: number; length: number; fixtureIds: string[]; replace: boolean },
+	) => { ok: true; clips: number; frames: number; skipped: number } | { ok: false; error: string }
+	removeEffectRun: (id: string) => void
+	/** add effects from a pack; returns how many were added or updated */
+	importEffects: (list: EffectDef[]) => number
+	removeCustomEffect: (id: string) => void
 	addFrame: (fixtureId: string, at: number) => void
 	updateFrame: (id: string, patch: Partial<Omit<PoseFrame, "id" | "fixtureId">>) => void
 	/** tune a moving head's motors to match the real fixture (null = back to the profile's defaults) */
@@ -353,6 +392,8 @@ let cueCounter = 1
 let audioCounter = 1
 let accentCounter = 1
 let frameCounter = 1
+let effectCounter = 1
+const BUILTIN_IDS = BUILTIN_EFFECTS.map((e) => e.id)
 
 const patchClip = (clips: Clip[], id: string, fn: (c: Clip) => Clip): Clip[] =>
 	clips.map((c) => (c.id === id ? fn(c) : c))
@@ -486,7 +527,7 @@ function placeGroup(
 					? fr.fixtureId
 					: undefined
 		if (!fixtureId) return []
-		return [{ ...fr, id: nextFrameId(), fixtureId, start: fr.start + offset + shift }]
+		return [{ ...fr, id: nextFrameId(), fixtureId, start: fr.start + offset + shift, source: undefined }]
 	})
 	const placed: { start: number; duration?: number }[] = [...placedClips, ...accents, ...audio, ...frames]
 	if (!placed.length) return null // e.g. only clips were copied and there are no lights to put them on
@@ -523,6 +564,8 @@ export const useStore = create<State>((rawSet, get) => {
 	selection: [],
 	frames: [],
 	selectedFrameId: null,
+	customEffects: [],
+	effectRuns: [],
 	clips: [],
 	selectedClipId: null,
 	playhead: 0,
@@ -679,13 +722,16 @@ export const useStore = create<State>((rawSet, get) => {
 			if (!c) return {}
 			const end = c.start + c.duration
 			if (at < c.start + MIN_CLIP || at > end - MIN_CLIP) return {}
-			const left = fit({ ...c, duration: at - c.start, fadeOut: 0 })
+			// a gradient clip splits into two halves that meet on the same colour, so nothing changes to the eye
+			const mid = c.to ? clipColor(c, at).map(Math.round) : undefined
+			const left = fit({ ...c, duration: at - c.start, fadeOut: 0, ...(mid ? { to: mid as [number, number, number] } : {}) })
 			const right = fit({
 				...c,
 				id: `clip${Date.now()}${clipCounter++}`,
 				start: at,
 				duration: end - at,
 				fadeIn: 0,
+				...(mid ? { r: mid[0], g: mid[1], b: mid[2] } : {}),
 			})
 			return { clips: [...s.clips.filter((x) => x.id !== id), left, right] }
 		}),
@@ -903,6 +949,78 @@ export const useStore = create<State>((rawSet, get) => {
 			}),
 		})),
 
+	applyEffect: (def, values, opts) => {
+		const s = get()
+		const moving = ENGINES[def.engine].kind === "move"
+		const targets = s.fixtures.filter((f) => opts.fixtureIds.includes(f.id) && (!moving || motionOf(f)))
+		if (targets.length === 0) {
+			return { ok: false, error: moving ? "Add a moving head first (this effect only plays on moving heads)." : "Pick at least one light." }
+		}
+		const start = Math.max(0, opts.start)
+		const end = start + opts.length
+		// beat-synced effects follow the selected song's beats, or else the first song that has some
+		const audio = s.audioClips.find((a) => a.id === s.selectedAudioId && a.beats?.length) ?? s.audioClips.find((a) => a.beats?.length)
+		const beats = audio ? audioBeatTimes(audio).filter((t) => t >= start - 1e-9 && t < end) : []
+		const res = generateEffect(def, values, {
+			start,
+			length: opts.length,
+			fixtures: targets.map((f) => ({ id: f.id, spec: motionOf(f) ?? undefined })),
+			beats,
+			bpm: audio?.bpm ?? 120,
+			seed: 1 + Math.floor(Math.random() * 2147483646),
+		})
+		if (!res.ok) return res
+		const runId = `fx${Date.now()}${effectCounter++}`
+		const source = `fx:${runId}`
+		const ids = new Set(targets.map((f) => f.id))
+		let skipped = 0
+		set((cur) => {
+			let clips = cur.clips
+			let frames = cur.frames
+			if (opts.replace) {
+				// a head pattern replaces MOVEMENT only; a colour effect replaces colour clips only
+				if (moving) frames = frames.filter((f) => !(ids.has(f.fixtureId) && f.start >= start - 1e-6 && f.start <= end + 1e-6))
+				else clips = carveClips(clips, ids, start, end, nextClipId)
+			}
+			const added: Clip[] = []
+			for (const d of res.clips) {
+				// without "replace", a new clip that would land on an existing one is skipped rather than overwriting it
+				const clash = clips.some((c) => c.fixtureId === d.fixtureId && c.start < d.start + d.duration - 1e-6 && c.start + c.duration > d.start + 1e-6)
+				if (clash) skipped++
+				else added.push({ ...d, id: nextClipId(), source })
+			}
+			const newFrames: PoseFrame[] = res.frames.map((d) => ({ ...d, id: nextFrameId(), source }))
+			const run: EffectRun = { id: runId, name: def.name, start, end, fixtureIds: [...ids], clips: added.length, frames: newFrames.length }
+			return { clips: [...clips, ...added], frames: [...frames, ...newFrames], effectRuns: [...cur.effectRuns, run].slice(-200) }
+		})
+		return { ok: true, clips: res.clips.length - skipped, frames: res.frames.length, skipped }
+	},
+	removeEffectRun: (id) =>
+		set((s) => {
+			const source = `fx:${id}`
+			const clips = s.clips.filter((c) => c.source !== source)
+			const frames = s.frames.filter((f) => f.source !== source)
+			const alive = new Set([...clips.map((c) => c.id), ...frames.map((f) => f.id), ...s.accents.map((a) => a.id), ...s.audioClips.map((a) => a.id)])
+			return { clips, frames, effectRuns: s.effectRuns.filter((r) => r.id !== id), selection: s.selection.filter((x) => alive.has(x)) }
+		}),
+	importEffects: (list) => {
+		const taken = new Set(BUILTIN_IDS)
+		let count = 0
+		set((s) => {
+			const next = s.customEffects.slice()
+			for (const e of list) {
+				// an imported effect never replaces a built-in one: it gets a new id instead
+				const id = taken.has(e.id) ? `${e.id}-imported` : e.id
+				const i = next.findIndex((x) => x.id === id)
+				if (i >= 0) next[i] = { ...e, id }
+				else next.push({ ...e, id })
+				count++
+			}
+			return { customEffects: next.slice(-200) }
+		})
+		return count
+	},
+	removeCustomEffect: (id) => set((s) => ({ customEffects: s.customEffects.filter((e) => e.id !== id) })),
 	addFrame: (fixtureId, at) =>
 		set((s) => {
 			const f = s.fixtures.find((x) => x.id === fixtureId)
@@ -1003,7 +1121,7 @@ export const useStore = create<State>((rawSet, get) => {
 		const audio = s.audioClips
 			.filter((a) => want.has(a.id))
 			.map((a) => ({ ...a, id: (map[a.id] = nextAudioId()), beats: a.beats?.slice() }))
-		const frames = s.frames.filter((f) => want.has(f.id)).map((f) => ({ ...f, id: (map[f.id] = nextFrameId()) }))
+		const frames = s.frames.filter((f) => want.has(f.id)).map((f) => ({ ...f, id: (map[f.id] = nextFrameId()), source: undefined }))
 		set({
 			clips: [...s.clips, ...clips],
 			accents: [...s.accents, ...accents],
@@ -1085,6 +1203,8 @@ export const useStore = create<State>((rawSet, get) => {
 			fixtures,
 			frames: validFrames(p.frames).filter((fr) => fixtures.some((f) => f.id === fr.fixtureId)),
 			selectedFrameId: null,
+			customEffects: (Array.isArray(p.customEffects) ? p.customEffects.slice(0, 200) : []).map(normalizeEffect).filter((e): e is EffectDef => !!e),
+			effectRuns: validRuns(p.effectRuns),
 			stageView: p.stageView === "3d" ? "3d" : "2d",
 			stage: p.stage === "demo" ? "demo" : null,
 			clips: Array.isArray(p.clips) ? p.clips : [],

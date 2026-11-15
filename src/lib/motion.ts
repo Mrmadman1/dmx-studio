@@ -28,6 +28,8 @@ export interface PoseFrame {
 	tilt: number
 	/** how the head travels INTO this frame from the one before it */
 	ease: Ease
+	/** set on frames written by an effect, so the effect can be removed as a whole */
+	source?: string
 }
 
 export interface Pose {
@@ -79,6 +81,7 @@ export function validFrames(list: unknown): PoseFrame[] {
 				pan: n(f.pan),
 				tilt: n(f.tilt),
 				ease: f.ease === "linear" || f.ease === "hold" ? f.ease : "smooth",
+				...(typeof f.source === "string" ? { source: f.source.slice(0, 80) } : {}),
 			},
 		]
 	})

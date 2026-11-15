@@ -21,7 +21,9 @@ export interface Clip {
 	fadeIn: number
 	fadeOut: number
 	curve: Curve
-	/** set on clips generated from an audio clip's beats, so they can be cleared together */
+	/** a colour to glide to by the end of the clip (otherwise it stays r,g,b throughout) */
+	to?: [number, number, number]
+	/** set on clips generated from an audio clip's beats or by an effect, so they can be cleared together */
 	source?: string
 }
 
@@ -131,6 +133,14 @@ export function effectiveValues(f: Fixture, clips: Clip[], t: number, accents: A
 	return pose && spec ? applyPose(base, f.profileId, pose, spec) : base
 }
 
+/** The colour a clip shows at time t: its own colour, or a blend toward its end colour if it has one. */
+export function clipColor(c: Clip, t: number): [number, number, number] {
+	const to = c.to
+	if (!Array.isArray(to) || to.length !== 3 || !to.every((v) => Number.isFinite(v))) return [c.r, c.g, c.b]
+	const f = Math.min(1, Math.max(0, (t - c.start) / Math.max(1e-6, c.duration)))
+	return [c.r + (to[0] - c.r) * f, c.g + (to[1] - c.g) * f, c.b + (to[2] - c.b) * f]
+}
+
 function colourValues(f: Fixture, clips: Clip[], t: number, accents: Accent[]): number[] {
 	const own = clips.filter((c) => c.fixtureId === f.id)
 	if (own.length === 0) return f.values
@@ -140,8 +150,9 @@ function colourValues(f: Fixture, clips: Clip[], t: number, accents: Accent[]): 
 	const channels = profileById(f.profileId).channels
 	const hasDimmer = channels.some((c) => c.kind === "dimmer")
 	const values = f.values.slice()
+	const [cr, cg, cb] = active ? clipColor(active, t) : [0, 0, 0]
 	channels.forEach((ch, i) => {
-		const base = active ? { red: active.r, green: active.g, blue: active.b }[ch.kind as string] : 0
+		const base = active ? { red: cr, green: cg, blue: cb }[ch.kind as string] : 0
 		if (ch.kind === "dimmer") values[i] = Math.round(255 * level)
 		else if (ch.kind === "red" || ch.kind === "green" || ch.kind === "blue") {
 			values[i] = Math.round((base ?? 0) * (hasDimmer ? 1 : level))
